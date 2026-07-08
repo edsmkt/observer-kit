@@ -77,6 +77,20 @@ Never run a full list first. Always:
 Iterations show as **before/after** in the dashboard — a changed cell renders
 "· was X" — so the operator sees exactly what your adjustment changed.
 
+**Continuous by source (default):** name the scope for the dataset
+(`f'enrich-{table}'`), and every run over that source appends to ONE continuous
+run — same table, before/after across iterations, chat notes + ✓ persisting. Use
+`current_run_id(scope)` for the matching chat id. Set `RUNGUARD_SESSION=<slug>`
+only to open a SEPARATE lane (a dated slug for a fresh weekly run, or a unique
+label for a clean A/B).
+
+**Redo specific rows (agent handles this):** the "never re-buy" guard skips rows
+whose outcome is already recorded. To redo rows on request — e.g. an operator note
+on a cell, whose anchor names the exact row + column — clear just those rows'
+value/outcome in the durable store, then re-run the sample. Only the reset rows
+re-process (and re-charge); everything else is untouched. Never disable the global
+guard to force a redo — reset the specific rows.
+
 ## Receiving operator feedback (inline chat)
 
 The operator leaves notes anchored to a column or cell in the dashboard. They

@@ -91,11 +91,21 @@ def release_lock(name: str) -> None:
 
 
 def ledger(scope: str, event: str, **fields) -> None:
-    """Append one audit record to this run's JSONL ledger for the given scope."""
+    """Append one audit record to this run's JSONL ledger for the given scope.
+
+    Runs over the SAME source share ONE continuous run by default: the ledger is
+    named for the scope (which should encode the dataset identity, e.g.
+    'enrich-prospects-csv'), so re-running the same source keeps appending to the
+    same run — the dashboard shows the iterations in one table with before/after
+    "· was X", and chat notes / ✓ persist across re-runs.
+
+    Set RUNGUARD_SESSION=<slug> only to open a SEPARATE lane (a dated slug for a
+    fresh weekly run, or a unique label for a clean A/B) → '<slug>-<scope>.jsonl'."""
     if scope not in _ledgers:
         os.makedirs(_STATE_DIR, exist_ok=True)
-        _ledgers[scope] = os.path.join(
-            _STATE_DIR, f"{time.strftime('%Y-%m-%d-%H%M%S')}-{scope}.jsonl")
+        session = os.environ.get('RUNGUARD_SESSION')
+        name = f"{session}-{scope}.jsonl" if session else f"{scope}.jsonl"
+        _ledgers[scope] = os.path.join(_STATE_DIR, name)
     rec = {'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'event': event}
     rec.update(fields)
     with open(_ledgers[scope], 'a') as f:
@@ -104,6 +114,14 @@ def ledger(scope: str, event: str, **fields) -> None:
 
 def ledger_path(scope: str) -> str | None:
     return _ledgers.get(scope)
+
+
+def current_run_id(scope: str) -> str | None:
+    """The dashboard run id for this scope's ledger ('runguard:<file>'). Pass it to
+    read_chat/post_chat so chat lands on the same run the dashboard is showing.
+    With RUNGUARD_SESSION pinned this stays stable across re-runs, so notes persist."""
+    p = _ledgers.get(scope)
+    return f'runguard:{os.path.basename(p)}' if p else None
 
 
 def throttle(resource: str, per_second: float) -> None:
