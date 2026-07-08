@@ -111,16 +111,27 @@ that run's watcher. **On setup, add this to the project's `.claude/settings.json
     "PostToolUse": [
       { "matcher": "Bash",
         "hooks": [ { "type": "command",
+          "if": "Bash(python3 *)",
           "command": "python3 ~/.claude/skills/observer-kit/observer_hook.py" } ] } ]
   }
 }
 ```
 
+Keep it **specific so it never touches unrelated work**:
+- **Install it project-local** (`.claude/settings.local.json` in the repo that runs
+  observer-kit), NOT global — a global hook would run on every Bash in every project.
+- The **`if: "Bash(python3 *)"`** guard means it only even executes on `python3 …`
+  launches — `git`, `ls`, etc. never trigger it. (Adjust the pattern if your runs launch
+  another way, e.g. `Bash(./run.sh *)`.)
+- Even when it runs, it is **silent unless** the output contains the very specific
+  `OBSERVER_RUN_STARTED runguard:<file>` marker — so it never injects into unrelated
+  commands. Silent hooks are invisible in the UI.
+
 (Use the vendored path if the kit isn't user-installed, e.g. `python3 tools/observer-kit/observer_hook.py`.)
-Then, when a run starts, the hook nudges you to run `watch_chat.py <run_id>` — the
-run-scoped watcher, so notes reach the right session. It's a **backstop**: reliable for
-foreground launches; a background launch's marker may not be in the immediate tool
-output, so still start the watcher yourself when you launch in the background.
+When a run starts, the hook nudges you to run `watch_chat.py <run_id>` — the run-scoped
+watcher, so notes reach the right session. It's a **backstop**: reliable for foreground
+launches; a background launch's marker may not be in the immediate tool output, so still
+start the watcher yourself when you launch in the background.
 
 ## Optional add-ons (reach for the ones that fit)
 
