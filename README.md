@@ -101,8 +101,8 @@ python3 example_worker.py --table alpha   # a second copy REFUSES — the guard 
 | File | What it is |
 |------|-----------|
 | `SKILL.md` | Agent entry point — when to use it and how to wire it in |
-| `runguard.py` | Locks + append-only ledger + cross-process throttle |
-| `run_dashboard.py` | The localhost observer (a sample — adapt to your events) |
+| `runguard.py` | Locks + append-only ledger + cross-process throttle — **a library; vendor it into your project** (your script imports it) |
+| `run_dashboard.py` | The localhost observer — **a standalone app; run ONE instance** pointed at any project's ledger dir (`python3 run_dashboard.py <dir>`), don't vendor it per-project |
 | `EXPLAIN.md` | Template for the plain-English + ASCII "statement of intent" |
 | `example_worker.py` | Runnable end-to-end example (parallel datasets + throttle) |
 | `README.md` | The full pattern, event vocabulary, safety rules |

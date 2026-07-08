@@ -23,17 +23,27 @@ Stdlib only. Localhost only.
 import json
 import os
 import re
+import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# This is a run-once GLOBAL observer, not a per-project file to vendor. Point it at
+# any project's ledger dir — no editing needed:
+#     python3 run_dashboard.py /path/to/.runguard          (positional arg)
+#     RUNGUARD_STATE_DIR=/path/to/.runguard python3 run_dashboard.py   (env)
+#     python3 run_dashboard.py <dir> --port 8485
+# It's read-only; one instance can observe whatever ledger dir you give it.
 BASE = os.path.dirname(os.path.abspath(__file__))
+_arg_dir = next((a for a in sys.argv[1:] if not a.startswith('-')), None)
+_runguard_dir = _arg_dir or os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(BASE, '.runguard')
 SOURCES = {
+    'runguard': _runguard_dir,                          # runguard ledgers + locks
     'push': os.path.join(BASE, 'runs'),                 # per-run subdirs (optional)
     'enrich': os.path.join(BASE, 'enrich_runs'),        # flat jsonl dir (optional)
-    'runguard': os.environ.get('RUNGUARD_STATE_DIR')    # runguard ledgers + locks
-                or os.path.join(BASE, '.runguard'),
 }
-PORT = 8484
+PORT = int(os.environ.get('OBSERVER_PORT', '8484'))
+if '--port' in sys.argv:
+    PORT = int(sys.argv[sys.argv.index('--port') + 1])
 # Inline-chat inbox: the ONLY thing this dashboard writes. Users leave notes
 # anchored to columns/cells; the agent watches this file and replies by appending
 # lines with "author":"agent". It never touches run ledgers or run state.

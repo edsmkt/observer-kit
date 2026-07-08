@@ -34,9 +34,13 @@ they're in place first.
 
 ## Make an existing script show live + guarded (the core — 3 moves)
 
-Copy `runguard.py` and `run_dashboard.py` into the target project (vendor them;
-don't import from the skill dir). Then add three things to the script that
-already exists:
+`runguard.py` and `run_dashboard.py` play different roles — treat them differently:
+- **`runguard.py` is a library your script imports** → **vendor it** (copy it into
+  the target project, next to the script). ~200 lines, stdlib-only.
+- **`run_dashboard.py` is a standalone viewer** → **do NOT vendor it.** Run one
+  instance, pointed at whatever project's ledger dir. One observer serves every project.
+
+Then add three things to the script that already exists:
 
 **1. Lock it** — one line before the first spend/write:
 ```python
@@ -62,12 +66,15 @@ companies → contacts → enriched); identify rows with `key=` (repeat a key to
 update that row in place → renders `· was X`); every other field becomes a
 column; booleans show ✓/—; the top counters are derived from the data.
 
-**3. Watch it** — point the dashboard at the ledger dir and open it:
+**3. Watch it** — run the observer, pointed at that project's ledger dir (no
+copying, no editing — just pass the dir):
 ```bash
-python3 run_dashboard.py     # http://localhost:8484
+python3 /path/to/observer-kit/run_dashboard.py <project>/.runguard   # http://localhost:8484
+# or:  RUNGUARD_STATE_DIR=<project>/.runguard python3 run_dashboard.py
+# add --port 8485 to observe a second project at the same time
 ```
-Set its `SOURCES` to the project's ledger directory once. Read-only — it tails
-the files and never touches a run.
+Read-only — it tails the files and never touches a run. One instance can observe
+any project; you don't vendor it per-project.
 
 That's the whole core. The script now can't collide, has an audit trail, and
 streams live — without changing what it actually does.
