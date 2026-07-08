@@ -203,7 +203,7 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .card .row{padding:3px 0;color:var(--txt)}
 .card .row small{color:var(--dim)}
 .tablewrap{overflow-x:auto;border-radius:10px}
-table{min-width:100%;table-layout:fixed;border-collapse:separate;border-spacing:0;background:var(--card)}
+table{table-layout:fixed;border-collapse:separate;border-spacing:0;background:var(--card)}
 th{position:sticky;top:0;z-index:2;background:#242e3a;text-align:left;padding:9px 12px;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 td{padding:8px 12px;border-top:1px solid var(--line);vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 tr:hover td{background:#232c36}
@@ -373,12 +373,15 @@ let rz=null;
 content.addEventListener('mousedown',ev=>{
   const h=ev.target.closest('.rz'); if(!h)return;
   ev.preventDefault(); ev.stopPropagation();
-  const th=h.closest('th'); rz={th,col:th.dataset.col,x:ev.clientX,w:th.offsetWidth};
+  const th=h.closest('th'), table=th.closest('table');
+  rz={th,table,col:th.dataset.col,x:ev.clientX,w:th.offsetWidth,tw:table.offsetWidth};
 });
 document.addEventListener('mousemove',ev=>{
   if(!rz)return;
   const w=Math.max(56, rz.w+ev.clientX-rz.x);
-  rz.th.style.width=w+'px'; colW[rz.col]=w;
+  rz.th.style.width=w+'px';
+  rz.table.style.width=(rz.tw+(w-rz.w))+'px';   // grow/shrink the table with the column
+  colW[rz.col]=w;
 });
 document.addEventListener('mouseup',()=>{ if(rz){localStorage.setItem('observer_colw',JSON.stringify(colW)); rz=null;} });
 function openCellModal(cell){
@@ -551,8 +554,15 @@ function render(){
     return '<span class="pill dim">—</span>';
   };
   const tierLabel={1:'Tier 1',2:'Tier 2',3:'Tier 3',4:'Tier 4',5:'Tier 5'};
+  const COLS=['Company','Person','Tier','Phone','Email','CRM id'];
+  const base=Object.fromEntries(COLS.map(c=>[c,colW[c]??COLW_DEFAULT[c]??160]));
+  if(!COLS.some(c=>colW[c]!=null)){            // fresh load: scale defaults to fill the pane
+    const avail=(content.clientWidth||1000)-4, sum=COLS.reduce((s,c)=>s+base[c],0);
+    if(sum<avail){const k=avail/sum; COLS.forEach(c=>base[c]=Math.round(base[c]*k));}
+  }
+  const totalW=COLS.reduce((s,c)=>s+base[c],0);
   content.innerHTML=list.length
-    ?`<div class=tablewrap><table><tr>${['Company','Person','Tier','Phone','Email','CRM id'].map(c=>`<th data-col="${c}" style="width:${colW[c]??COLW_DEFAULT[c]??160}px">${c}<span class=rz></span></th>`).join('')}</tr>`+
+    ?`<div class=tablewrap><table style="width:${totalW}px"><tr>${COLS.map(c=>`<th data-col="${c}" style="width:${base[c]}px">${c}<span class=rz></span></th>`).join('')}</tr>`+
       list.map((r,i)=>{
         const first=i===0||list[i-1].company!==r.company;
         return `<tr data-key="${esc(key(r.company,r.name))}" data-co="${esc(r.company||'')}" data-name="${esc(r.name||'')}">`+
