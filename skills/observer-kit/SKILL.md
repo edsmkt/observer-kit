@@ -1,255 +1,129 @@
 ---
 name: observer-kit
-description: >-
-  Guardrails and a live localhost dashboard for any script that spends API
-  credits or mutates shared state (CRM, database, spreadsheets). Use BEFORE
-  writing or running batch jobs, enrichment or scraping runs, or bulk record
-  writes — including scripts the engineer already wrote. Adds crash-safe run
-  locks (a second accidental run refuses to start, so nothing double-spends or
-  corrupts data), cross-process rate limiting, an append-only audit ledger, and
-  a read-only web view of what each run is doing in real time. Optionally: a
-  plain-English EXPLAIN.md the operator can verify, and a sample-first loop with
-  inline chat to steer before the full run.
-metadata:
-  author: edsmkt
-  tags: [batch, enrichment, safety, locks, rate-limiting, observability, credits]
+description: Guardrails and a live localhost dashboard for scripts that spend API credits, scrape in bulk, send messages, or mutate shared state such as CRM, database, and spreadsheet records. Use before writing or running batch jobs, enrichment workflows, contact sourcing, scraping runs, CRM pushes, backfills, or any workflow where duplicate runs, hidden failures, or full-run execution without review could cost money or corrupt data.
 ---
 
 # observer-kit
 
-Take a batch script — one the engineer already wrote, or one you're about to
-write — and make it **guarded and visible**: it can't collide with another run,
-every action lands in an audit trail, and the operator watches it live in a
-browser. Three stdlib-only files, zero dependencies.
+Use Observer Kit to make risky batch scripts guarded, observable, and reviewable.
+Default to the smallest safe integration: a run lock, append-only ledger, dry-run
+sample, dashboard review, and explicit confirmation before the full run.
 
-## When to reach for this
+## Non-negotiable run gate
 
-The moment a script will:
-- call a paid API in bulk (per-lookup credits),
-- write in bulk to a CRM, database, or spreadsheet,
-- or is one where two accidental concurrent runs would double-spend or corrupt data.
+For any workflow that spends credits, scrapes in bulk, sends messages, or writes
+to a shared system:
 
-Wire it in **before** the code spends or writes — the guardrails only help if
-they're in place first.
+1. Add `--dry-run` plus `--limit` or `--sample-size`.
+2. Run a representative sample first, usually 5-25 records.
+3. Review the dashboard and summarize writes, skips, failures, schema issues, and
+   estimated spend.
+4. Wait for explicit confirmation before the full dataset.
+5. Make the full run intentional, e.g. require `--full-run`.
 
-## Required run gate: dry-run sample before full run
+Treat silence as no approval. If the user asks to skip the gate, call out the
+risk and still keep dry-run and hard limits available.
 
-For any workflow that spends credits, scrapes in bulk, sends messages, or mutates a
-shared system, do **not** start with the full dataset.
+Recommended CLI shape:
 
-The default operating sequence is:
+```bash
+python3 workflow.py --dry-run --limit 10
+python3 workflow.py --limit 10
+python3 workflow.py --full-run
+```
 
-1. Build the script with `--dry-run`, `--limit`, and/or `--sample-size`.
-2. Run a small representative sample first (usually 5-25 records, smaller if the
-   operation is expensive or risky).
-3. Show the operator the dashboard results and summarize: what would be written,
-   what would be skipped, failures, estimated spend, and any schema concerns.
-4. Wait for explicit confirmation before running the full dataset.
-5. Only then run the full job, preferably with a hard spend/write ceiling.
+## Files to use
 
-Treat missing confirmation as a stop. Do not infer approval from silence, and do
-not run the full dataset just because the sample succeeded. If the user explicitly
-asks to skip the sample gate, call out the risk and still keep `--dry-run` and a
-hard limit available.
+- `runguard.py`: library to vendor next to the target script.
+- `run_dashboard.py`: standalone viewer; run one instance pointed at a ledger dir.
+- `watch_chat.py`: run-scoped watcher for dashboard notes.
+- `observer_hook.py`: optional Claude Code hook for run-start reminders.
+- `README.md`: detailed event vocabulary and dashboard behavior.
+- `BUILD-GUIDE.md`: rebuild/acceptance-test reference.
 
-## Make an existing script show live + guarded (the core — 3 moves)
+Run `python3 test_runguard.py` after changing the safety core.
 
-`runguard.py` and `run_dashboard.py` play different roles — treat them differently:
-- **`runguard.py` is a library your script imports** → **vendor it** (copy it into
-  the target project, next to the script). ~200 lines, stdlib-only.
-- **`run_dashboard.py` is a standalone viewer** → **do NOT vendor it.** Run one
-  instance, pointed at whatever project's ledger dir. One observer serves every project.
+## Preferred wrapper
 
-**Default to the boring wrapper for new scripts.** It gives you the minimum run
-contract in one place: run id, lock, ledger, dry-run state, visible step rows,
-counters, checkpoints, and lifecycle closure.
+For new Python scripts, use `start_observed_run()` unless the workflow needs
+custom low-level events.
 
 ```python
 from runguard import start_observed_run
 
 run = start_observed_run(
-    'enrich-leads',
-    lock_key='hubspot-enrich-july-batch',
+    'workflow-name',
+    lock_key='dataset-or-system-identity',
     dry_run=args.dry_run,
-    description='Enrich July HubSpot leads',
-    todo=len(leads),
+    description='What this run does',
+    todo=len(items),
 )
 
 try:
-    for lead in leads:
-        with run.step('enrich_lead', table='companies', key=lead.id,
-                      company=lead.domain):
-            enriched = enrich_lead(lead)
+    for item in items:
+        with run.step('step_name', table='companies', key=item.id,
+                      company=item.domain):
+            result = do_work(item)
 
             if not run.dry_run:
-                update_crm_lead(lead.id, enriched)
+                write_result(item, result)
 
-            run.count('leads_enriched')
-            run.checkpoint('last_lead', lead.id)
+            run.count('items_processed')
+            run.checkpoint('last_item', item.id)
 
-    run.success(processed=len(leads))
+    run.success(processed=len(items))
 except Exception as exc:
     run.fail(exc)
     raise
 ```
 
-Use the lower-level primitives below when a script needs custom event vocabulary.
-Do not make this ceremony: if adding Observer Kit to a risky script takes more
-than a few minutes, keep the wrapper and simplify the integration.
+The wrapper gives the run a lock, run id, ledger, dry-run state, visible record
+rows, counters, checkpoints, and success/fail lifecycle closure.
 
-Also add a sample/full-run CLI shape by default:
+## Wiring steps
+
+1. Vendor `runguard.py` into the project next to the risky script.
+2. Acquire the run through `start_observed_run()` before the first spend/write.
+3. Put every external write or paid call inside a visible `run.step(...)`.
+4. Check `run.dry_run` before mutating any external system.
+5. Log stable row identity with `table=` and `key=`.
+6. Add counters and checkpoints that make resume/audit obvious.
+7. Run the dashboard against the state dir:
 
 ```bash
-python3 workflow.py --dry-run --limit 10   # sample only; review dashboard
-python3 workflow.py --limit 10             # optional live sample after approval
-python3 workflow.py --full-run             # full run only after explicit approval
+python3 /path/to/observer-kit/run_dashboard.py <project>/.runguard
 ```
 
-Make `--full-run` an intentional flag, not the default. When possible, make the
-script refuse a full run unless `--full-run` is passed.
+Use `--port 8485` for a second dashboard.
 
-**First, agree the schema with the operator — propose, don't interrogate.** The
-dashboard shows *exactly* the fields you log, so decide them together before wiring.
-Read what the script does, **propose a sensible default**, and let them accept, edit,
-add, or drop:
+## Dashboard schema
 
-> "Here's what I'd surface — one row per **company**: `source · condition · supabase ·
-> hubspot · status`, plus a **contacts** table (`name · title · tier · email`). Accept,
-> or want columns added/removed?"
+Before wiring a new workflow, propose the dashboard rows and columns to the
+operator instead of asking an open-ended question. Cover:
 
-In the proposal, cover: **which entities/steps** (each becomes a `table` / sub-tab);
-**where each row was pulled from and pushed to** (Supabase / HubSpot / Cloudflare /
-CSV / webhook…), plus conditions and a status (each a column); and **any key fields**
-they'll want to eyeball. Whatever they land on *is* your `record` schema — log those
-field names verbatim. Re-propose whenever the pipeline changes.
+- entities or steps as `table=` values, such as `companies`, `contacts`, `writes`;
+- sources and destinations as columns, such as `source`, `supabase`, `hubspot`;
+- status/outcome fields, such as `status`, `condition`, `error`;
+- stable row identity via `key=`.
 
-Then add three things to the script that already exists:
+Example proposal:
 
-**1. Lock it** — one line before the first spend/write:
-```python
-from runguard import acquire_lock, ledger
-acquire_lock('my-scope')   # scope = the dataset's identity, e.g. f'enrich-{table}'
-```
-A second run on the same scope hard-refuses (SystemExit) while the first is
-alive — nothing double-spends. Different scopes still run in parallel.
+> I will surface one `companies` row per domain with `source`, `condition`,
+> `supabase`, `hubspot`, `status`, plus a `contacts` table with `name`, `title`,
+> `tier`, `email`. Confirm or edit before I wire the ledger.
 
-**2. Ledger it** — bracket the run, and log one `record` per unit of work, with the
-fields the operator asked for:
-```python
-ledger('my-scope', 'run_started', description='what this run does')
-for item in work:
-    ...whatever the script already does...
-    # field names below = exactly what they said they want to see
-    ledger('my-scope', 'record', table='companies', key=item.id,
-           company=item.domain, source='northdata',
-           condition='met', supabase='inserted', hubspot='pushed', status='done')
-ledger('my-scope', 'run_finished', processed=len(work))  # numeric fields become top-bar totals
-```
-The ledger is BOTH the audit trail and the dashboard's feed. `record` events are
-the general path — the dashboard builds a table from whatever fields you log, no
-column config. Group steps with `table=` (each becomes its own sub-tab:
-companies → contacts → enriched); identify rows with `key=` (repeat a key to
-update that row in place → renders `· was X`); every other field becomes a
-column; booleans show ✓/—; the top counters are derived from the data.
+## Safety rules
 
-**3. Watch it** — run the observer, pointed at that project's ledger dir (no
-copying, no editing — just pass the dir):
-```bash
-python3 /path/to/observer-kit/run_dashboard.py <project>/.runguard   # http://localhost:8484
-# or:  RUNGUARD_STATE_DIR=<project>/.runguard python3 run_dashboard.py
-# add --port 8485 to observe a second project at the same time
-```
-Read-only — it tails the files and never touches a run. One instance can observe
-any project; you don't vendor it per-project.
+- A lock refusal is the guard working. Do not bypass it or start a parallel run.
+- Design for resume by re-reading durable state; avoid cleanup-only recovery.
+- Put a hard spend/write ceiling in code.
+- Never re-buy or rewrite a record whose outcome is already logged.
+- Use `throttle(provider, rate)` before calls to shared provider accounts.
+- Use `EXPLAIN.md` for non-obvious or high-risk pipelines.
 
-That's the whole core. The script now can't collide, has an audit trail, and
-streams live — without changing what it actually does.
+## Optional review loop
 
-## Setup once per project (Claude Code): the run-started hook
-
-So you don't have to *remember* to start the watcher, add a hook that reminds you
-whenever a run begins. `runguard` prints an `OBSERVER_RUN_STARTED <run_id>` marker on
-every `run_started`; the bundled `observer_hook.py` catches it and tells you to start
-that run's watcher. **On setup, add this to the project's `.claude/settings.json`**
-(merge with existing hooks — don't replace):
-
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      { "matcher": "Bash",
-        "hooks": [ { "type": "command",
-          "if": "Bash(python3 *)",
-          "command": "python3 <path-to>/observer_hook.py 2>/dev/null || true" } ] } ]
-  }
-}
-```
-
-Keep it **specific so it never touches unrelated work** — three independent guards:
-- **Scope to the project, never global.** Pick one:
-  - `.claude/settings.local.json` — personal & gitignored (just you); use
-    `~/.claude/skills/observer-kit/observer_hook.py` as the path.
-  - `.claude/settings.json` — committed, so **everyone who works in this repo** gets it.
-    For this, point at a **repo-vendored** path (e.g. `tools/observer-kit/observer_hook.py`),
-    NOT `~/.claude/...` which won't exist on a teammate's machine, and keep the
-    `2>/dev/null || true` so a teammate who doesn't use observer-kit sees nothing.
-
-    A global `~/.claude/settings.json` hook would run on every Bash in EVERY project — don't.
-- **`if: "Bash(python3 *)"`** — only executes on `python3 …` launches; `git`, `ls`, etc.
-  never trigger it. (Adjust for other launch styles, e.g. `Bash(./run.sh *)`.)
-- **Marker-gated** — even when it runs it's silent unless the output contains the specific
-  `OBSERVER_RUN_STARTED runguard:<file>` marker. Silent hooks are invisible in the UI.
-When a run starts, the hook nudges you to run `watch_chat.py <run_id>` — the run-scoped
-watcher, so notes reach the right session. It's a **backstop**: reliable for foreground
-launches; a background launch's marker may not be in the immediate tool output, so still
-start the watcher yourself when you launch in the background.
-
-## Optional add-ons (reach for the ones that fit)
-
-- **Throttle a shared API** — `throttle('<provider>', <per_second>)` before each
-  call, so several parallel runs share ONE rate budget (limits are per account).
-- **State intent up front (`EXPLAIN.md`)** — write a plain-English + one-ASCII-diagram
-  file in the state dir describing what the run will do and won't. The dashboard's
-  "How it works" tab renders it so a non-technical operator can verify before any
-  spend. Regenerate it when the pipeline changes. Template bundled.
-- **Sample-first is required for spend/write workflows.** Run a small sample, call
-  `wait_for_feedback(run_id)` (it blocks while the operator reviews the sample in
-  the dashboard and leaves notes on specific cells), adjust the script, re-sample,
-  then wait for explicit approval before the full list. Iterations show
-  before/after (`· was X`). Reply and resolve notes with
-  `post_chat(run_id, anchor, text, resolved=True)` (badge → ✓).
-  A running process can't change its own code, so all real iteration happens on
-  the sample; the full run polls `read_chat()` between rounds only for a STOP.
-- **Hear the operator while you're idle — start a RUN-SCOPED watcher (key for many
-  sessions).** After launching a run, set up a watcher so the operator's dashboard
-  notes reach you. Use the bundled `watch_chat.py <run_id>`: it prints new notes for
-  that one run and exits, so your harness re-invokes you with them. Get the id from
-  `runguard.current_run_id(scope)` (e.g. `runguard:2025-06-15-enrich.jsonl`).
-  - In **Claude Code**, point the Monitor tool at `python3 watch_chat.py <run_id>`.
-  - Otherwise, loop it (or poll `read_chat(run_id)` yourself).
-
-  **Scope it to YOUR run_id.** All notes land in one shared `chat.jsonl`; with several
-  sessions open, an *unscoped* watcher wakes every session on every note. A run-scoped
-  watcher routes each note to only the session that launched that run — session A never
-  wakes for a note left on session B's run.
-- **Continuous vs separate lanes** — same scope name = one continuous run
-  (before/after and chat persist across re-runs). Set `RUNGUARD_SESSION=<slug>`
-  to open a separate lane (a dated weekly run, or a clean A/B).
-
-## Safety rules (do not skip)
-
-- A lock refusal is the guard working, not an error to bypass. Stop the named
-  PID deliberately; never launch a parallel run to "fix" a stuck one.
-- Design so there is no cleanup step: write results to the durable store as they
-  land, and resume by re-reading what's still missing. A crash then costs
-  nothing and re-running is always safe.
-- Put a hard spend ceiling in code, and never re-buy a record whose outcome is
-  already logged.
-
-## Deeper reference (in this directory)
-
-- `README.md` — the full pattern and the `record` convention.
-- `BUILD-GUIDE.md` — rebuild the whole stack from scratch, with acceptance tests.
-- `example_worker.py` — runnable end-to-end example; run two copies to watch the
-  lock refuse the second.
-- `sample-ledger.jsonl` — demo data; the dashboard renders it with no run needed.
+For sample-first review inside the dashboard, call `wait_for_feedback(run_id)`
+after the sample. Reply with `post_chat(run_id, anchor, text, resolved=True)`.
+For long runs, poll `read_chat(run_id)` between rounds for STOP or adjustment
+requests.
