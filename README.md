@@ -1,8 +1,18 @@
-# Observer Kit
+<h1 align="center">observer-kit</h1>
 
-### For when your agent does the data work, but you still need to see it.
+<p align="center"><strong>For when your agent does the data work, but you still need to see it.</strong></p>
 
-![Observer Kit data view](assets/per-company.png)
+<p align="center">
+  <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-3776AB?style=flat-square" />
+  <img alt="Platform macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-4D8D6E?style=flat-square" />
+  <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-2F855A?style=flat-square" />
+  <img alt="Agent Skills" src="https://img.shields.io/badge/Agent%20Skills-compatible-5B6EE1?style=flat-square" />
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-5D6570?style=flat-square" />
+</p>
+
+<p align="center">
+  <img alt="Observer Kit data view" src="assets/per-company.png" width="960" />
+</p>
 
 Data transformation used to happen in familiar places: a database query, a
 spreadsheet, a table you could watch change row by row. Now an agent can pull
@@ -15,7 +25,7 @@ still running.
 Observer Kit turns an agent-run data transformation into a reviewable working
 session. It gives you a live local dashboard where you can see rows arrive,
 inspect what changed, message the agent about a specific record, and pause the
-run safely when something needs attention.
+run when something needs attention.
 
 Use it for imports, database exports, enrichment, backfills, CRM updates,
 spreadsheet pushes, and any other job that changes or moves many records.
@@ -25,7 +35,7 @@ It gives the collaboration loop a few simple pieces:
 - **A live table**: see the actual source rows and outcomes as work lands.
 - **A review conversation**: point the agent at a row or message it about the
   whole run.
-- **Safe controls**: pause at a checkpoint, stop after the current record, and
+- **Run controls**: pause at a checkpoint, stop after the current record, and
   approve a full run only after reviewing a sample.
 - **An agent playbook and small CLI**: the agent builds the workflow; the CLI
   provides the repeatable local plumbing.
@@ -39,7 +49,7 @@ Agent adapts the real workflow
 Small sample runs first and fills the dashboard
             |
             v
-You inspect rows, message the agent, or pause safely
+You inspect rows, message the agent, or pause the run
             |
             v
 The agent fixes, continues, or starts the approved full run
@@ -77,7 +87,7 @@ statement of intent.
 
 During an active run, the monitor offers:
 
-- **Pause**: requests a pause at the script's next safe checkpoint.
+- **Pause**: requests a pause at the script's next checkpoint.
 - **Stop after this record**: lets the current record finish, then pauses.
 - **Approve full run**: appears after a dry-run sample and records your approval
   for the agent to start the intentional full-run command.
@@ -85,7 +95,7 @@ During an active run, the monitor offers:
 Clicking Pause or Stop sends the control request immediately and opens the
 normal chat so you can explain what the agent should inspect. A green check
 means the worker acknowledged the request. The dashboard does not kill a
-process; the script pauses at a checkpoint where its durable state is safe.
+process; the script pauses at a checkpoint where it has recorded its progress.
 
 ## Install
 
@@ -181,9 +191,9 @@ dashboard then stays live, and a restart can continue from durable progress.
 
 ## For Builders
 
-Observer Kit provides practical safety pieces when a workflow needs them:
+Observer Kit provides practical run-management pieces when a workflow needs them:
 
-- Source-based run locks and durable checkpoints for safe restarts.
+- Source-based run locks and durable checkpoints for restarts.
 - Append-only JSONL ledgers for live records, progress, and audit history.
 - Shared provider throttling across local processes.
 - Input snapshots, sample previews, validation, policy checks, and quality gates.
