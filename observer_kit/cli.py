@@ -384,10 +384,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="observer-kit",
         description="Initialize and run Observer Kit guardrails for risky batch scripts.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  observer-kit init .
+  observer-kit dashboard .runguard
+  observer-kit watch .runguard --all --follow
+  observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
+  observer-kit test
+""",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    init = sub.add_parser("init", help="vendor runguard.py and create a state dir")
+    init = sub.add_parser(
+        "init",
+        help="vendor runguard.py and create a state dir",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  observer-kit init .
+  observer-kit init ./my-project --force
+
+next:
+  observer-kit dashboard ./my-project/.runguard
+  observer-kit watch ./my-project/.runguard --all --follow
+""",
+    )
     init.add_argument("project", nargs="?", default=".", help="target project directory")
     init.add_argument("--state-dir", default=".runguard", help="state directory inside the project")
     init.add_argument("--force", action="store_true", help="overwrite existing files")
@@ -399,12 +419,38 @@ def build_parser() -> argparse.ArgumentParser:
                       help="do not vendor watch_chat.py next to runguard.py")
     init.set_defaults(func=cmd_init, explain=True, gitignore=True, watch=True)
 
-    dash = sub.add_parser("dashboard", help="run the localhost dashboard")
+    dash = sub.add_parser(
+        "dashboard",
+        help="run the localhost dashboard",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  observer-kit dashboard .runguard
+  observer-kit dashboard ./my-project/.runguard --port 8485
+
+For long-lived monitoring, keep this server running and launch pipelines in
+separate shells with observer-kit run --state-dir <same-dir> ...
+""",
+    )
     dash.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
     dash.add_argument("--port", type=int, default=8484, help="dashboard port")
     dash.set_defaults(func=cmd_dashboard)
 
-    watch = sub.add_parser("watch", help="bridge dashboard chat for one run to stdout")
+    watch = sub.add_parser(
+        "watch",
+        help="bridge dashboard chat to stdout for the active harness",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  # Preferred with a long-lived dashboard: bridge notes from any run.
+  observer-kit watch .runguard --all --follow
+
+  # Scoped bridge for one run id.
+  observer-kit watch .runguard --run runguard:my-run.jsonl --follow
+
+The watcher is transport only. It emits OBSERVER_CHAT_EVENT lines; the harness
+session remains responsible for inspecting data, editing scripts, rerunning,
+and replying.
+""",
+    )
     watch.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
     watch.add_argument("--run", help="run id, e.g. runguard:my-run.jsonl")
     watch.add_argument("--all", action="store_true", help="bridge dashboard chat for all runs")
@@ -415,7 +461,18 @@ def build_parser() -> argparse.ArgumentParser:
                        help="emit existing user notes instead of only new notes")
     watch.set_defaults(func=cmd_watch)
 
-    reply = sub.add_parser("reply", help="write an agent reply into dashboard chat")
+    reply = sub.add_parser(
+        "reply",
+        help="write an agent reply into dashboard chat",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""example:
+  observer-kit reply .runguard \\
+    --run runguard:my-run.jsonl \\
+    --anchor 'cell:companies::acme|companies::status' \\
+    --resolved \\
+    --text "Fixed the parser and reran the sample."
+""",
+    )
     reply.add_argument("state_dir", nargs="?", default=".runguard", help="ledger/state directory")
     reply.add_argument("--run", required=True, help="run id to reply to")
     reply.add_argument("--anchor", default="run", help="dashboard anchor/cell id")
@@ -423,7 +480,36 @@ def build_parser() -> argparse.ArgumentParser:
     reply.add_argument("--text", required=True, help="reply text")
     reply.set_defaults(func=cmd_reply)
 
-    run = sub.add_parser("run", help="run a command with dashboard/watch plumbing")
+    run = sub.add_parser(
+        "run",
+        help="run a command with Observer Kit state and watcher plumbing",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  # Dry-run sample in the current source lane.
+  observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
+
+  # Retry/fix/continue the same source data in the same dashboard run.
+  observer-kit run --state-dir .runguard --session july-import \\
+    -- python3 workflow.py --full-run
+
+  # Start a separate comparison or new batch run.
+  observer-kit run --state-dir .runguard --session auto \\
+    -- python3 workflow.py --full-run
+
+  # Quick demo: launch a temporary dashboard with this command.
+  observer-kit run --state-dir .runguard --dashboard \\
+    -- python3 workflow.py --dry-run --limit 10
+
+For persistent monitoring, prefer:
+  observer-kit dashboard .runguard
+  observer-kit watch .runguard --all --follow
+  observer-kit run --state-dir .runguard --session source-id -- ...
+
+Session rule:
+  same source retry/adaptation = reuse the same session or omit --session
+  clean comparison/new batch   = use --session auto or a new session name
+""",
+    )
     run.add_argument("--state-dir", default=".runguard", help="ledger/state directory")
     run.add_argument("--dashboard", action="store_true", help="start a dashboard for this run")
     run.add_argument("--port", type=int, default=8484, help="dashboard port")
@@ -438,10 +524,29 @@ def build_parser() -> argparse.ArgumentParser:
                      help="command to run; put -- before the command")
     run.set_defaults(func=cmd_run)
 
-    test = sub.add_parser("test", help="run runguard acceptance tests")
+    test = sub.add_parser(
+        "test",
+        help="run runguard acceptance tests",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""example:
+  observer-kit test
+""",
+    )
     test.set_defaults(func=cmd_test)
 
-    doctor = sub.add_parser("doctor", help="check a project for Observer Kit basics")
+    doctor = sub.add_parser(
+        "doctor",
+        help="check a project for Observer Kit basics",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  observer-kit doctor .
+  observer-kit doctor ./my-project
+
+Doctor checks the substrate only: vendored runguard.py/watch_chat.py, state dir,
+and available dashboard/tests. It does not prove a workflow uses the guardrails
+correctly.
+""",
+    )
     doctor.add_argument("project", nargs="?", default=".", help="project directory")
     doctor.add_argument("--state-dir", default=".runguard", help="state directory inside the project")
     doctor.set_defaults(func=cmd_doctor)
