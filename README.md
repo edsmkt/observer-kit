@@ -70,8 +70,6 @@ workflow itself: a company-sourcing run might show domains, qualification,
 LinkedIn, email, and sheet status; another workflow might show entirely
 different fields.
 
-![Timeline view](assets/timeline.png)
-
 The **Timeline** is the plain-English history of the run. **Attention** focuses
 on records that need a look. **How it works** shows the workflow's `EXPLAIN.md`
 statement of intent.
