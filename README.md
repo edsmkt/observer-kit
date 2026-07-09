@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Observer Kit data view" src="assets/per-company.png" width="960" />
+  <img alt="Observer Kit data view" src="assets/dashboard-live.png" width="960" />
 </p>
 
 Data transformation used to happen in familiar places: a database query, a
@@ -82,6 +82,8 @@ statement of intent.
   after it has paused or finished.
 - The agent receives these notes through the run watcher, replies in the same
   thread, and can update the script or resume the run.
+
+![Message the agent about the whole run](assets/dashboard-chat.png)
 
 ### Run Controls
 
