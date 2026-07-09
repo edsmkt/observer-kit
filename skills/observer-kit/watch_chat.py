@@ -26,6 +26,8 @@ watcher starts is not lost.
 Usage:
   python3 watch_chat.py <run_id> [--state-dir DIR] [--poll SEC]
                                  [--follow] [--timeout SEC] [--include-existing]
+  python3 watch_chat.py <run_id> --reply "text" [--anchor ANCHOR] [--resolved]
+                                 [--state-dir DIR]
 """
 import os
 import sys
@@ -69,9 +71,29 @@ def main():
     ap.add_argument('--timeout', type=float, default=0, help="0 = wait forever")
     ap.add_argument('--include-existing', action='store_true',
                     help="also emit notes already in the file at startup (default: only new)")
+    ap.add_argument('--reply', help="post an agent reply to chat.jsonl and exit")
+    ap.add_argument('--anchor', default='run', help="dashboard anchor/cell id (used with --reply)")
+    ap.add_argument('--resolved', action='store_true', help="mark the reply as resolved (used with --reply)")
     a = ap.parse_args()
 
     chat_path = os.path.join(a.state_dir, 'chat.jsonl')
+
+    # Reply mode: write one agent reply and exit (no poll).
+    if a.reply:
+        os.makedirs(a.state_dir, exist_ok=True)
+        rec = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "run": a.run_id,
+            "anchor": a.anchor,
+            "author": "agent",
+            "text": a.reply,
+            "resolved": bool(a.resolved),
+        }
+        with open(chat_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
+        return 0
+
+    # Poll mode: watch for new user notes.
     seen = set()
     if not a.include_existing:                      # ignore notes left before we started
         for m in _load(chat_path):
