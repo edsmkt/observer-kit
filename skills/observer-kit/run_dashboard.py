@@ -553,7 +553,7 @@ function isAttentionRecord(r){
 function recordGroups(){
   const SKIP=new Set(['ts','event','action','_file','key','table']);
   const groups={}, gorder=[];
-  for(const e of all.filter(e=>(e.event||e.action)==='record')){
+  for(const e of attemptEvents().filter(e=>(e.event||e.action)==='record')){
     const t=e.table||'records';
     if(!groups[t]){groups[t]={rows:{},order:[],cols:[]};gorder.push(t);}
     const g=groups[t];
@@ -655,6 +655,28 @@ async function loadExplain(){
   try{ const r=await (await fetch('/api/explain')).json(); return r.found?r.markdown:''; }
   catch(e){ return ''; }
 }
+function eventName(e){return e.action||e.event||'';}
+function latestAttemptIndex(){
+  let idx=-1;
+  for(let i=0;i<all.length;i++){
+    if(eventName(all[i])==='run_started')idx=i;
+  }
+  return idx;
+}
+function attemptEvents(){
+  const idx=latestAttemptIndex();
+  return idx>=0 ? all.slice(idx) : all;
+}
+function priorAttemptEvents(){
+  const idx=latestAttemptIndex();
+  return idx>0 ? all.slice(0,idx) : [];
+}
+function attemptBanner(){
+  const n=priorAttemptEvents().length;
+  return n
+    ? `<div class=card><small>Showing the latest attempt. ${n} earlier ledger event${n===1?'':'s'} remain in Timeline.</small></div>`
+    : '';
+}
 
 function render(){
   for(const [v,id] of Object.entries({records:'tabRecords',attention:'tabAttention',feed:'tabFeed',info:'tabInfo',explain:'tabExplain'}))
@@ -681,10 +703,11 @@ function render(){
 
   // run-level progress events (no per-record company+name) — kept OUT of the
   // table so a 10k-row run never buries them; shown in the Run info tab instead.
-  const general=mapped.filter(({e})=>!(e.company&&e.name)).filter(x=>tech||!x.h.technical);
+  const attemptMapped=attemptEvents().map(e=>({e,h:humanize(e)}));
+  const general=attemptMapped.filter(({e})=>!(e.company&&e.name)).filter(x=>tech||!x.h.technical);
 
   if(view==='info'){
-    let html='';
+    let html=attemptBanner();
     if(selMeta){
       html+=`<div class=card><h4>${esc(selMeta.name||'run')}</h4>`;
       if(selMeta.desc)html+=`<div class=row>${esc(selMeta.desc)}</div>`;
@@ -715,7 +738,7 @@ function render(){
   // Works for ANY workflow — not just contact enrichment. First column frozen,
   // resize/expand/scroll/chat all apply. Falls through to the enrichment table below
   // when a run has no `record` events.
-  const recEvents=all.filter(e=>(e.event||e.action)==='record');
+  const recEvents=attemptEvents().filter(e=>(e.event||e.action)==='record');
   if(recEvents.length){
     // group records by their `table` field: a multi-step workflow emits different
     // shapes at each step (companies → contacts → enriched…), each its own table.
@@ -724,7 +747,7 @@ function render(){
     // one SUB-TAB per table (companies / contacts / …) instead of stacking them —
     // a workflow step's output gets its own tab, not buried under the previous step's rows.
     if(!gorder.includes(recTab))recTab=gorder[0];
-    let html='';
+    let html=attemptBanner();
     const hasSubtabs=gorder.length>1;
     if(hasSubtabs)
       html+=`<div class=recordshell style="height:${contentViewportHeight()}px"><div class=subtabs>`+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab('${esc(t)}')">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>';
@@ -761,7 +784,7 @@ function render(){
   // records: one table row per (company, person); events fold into columns
   const rows={};
   const key=(co,name)=>co+'|'+(name||'—');
-  for(const e of all){
+  for(const e of attemptEvents()){
     const a=e.action||e.event||'';
     if(a==='bc_submitted'){
       for(const c of (e.contacts||[])){
@@ -820,7 +843,8 @@ function renderStats(){
   const prov={}; let errors=0;
   const recByTable={};   // table -> {key -> merged row}
   let enrichRun=false; const s={phones:0,emails:0,misses:0,writes:0,assoc:0};
-  for(const e of all){
+  const events=attemptEvents();
+  for(const e of events){
     const a=e.action||e.event||'';
     if(a==='record'){
       const t=e.table||'records', g=recByTable[t]=recByTable[t]||{};
@@ -844,8 +868,8 @@ function renderStats(){
   const chips=[];
   const flatRecords=[];
   const tables=Object.keys(recByTable);
-  const started=[...all].find(e=>(e.event||e.action)==='run_started')||{};
-  const fin=[...all].reverse().find(e=>(e.event||e.action)==='run_finished');
+  const started=[...events].find(e=>(e.event||e.action)==='run_started')||{};
+  const fin=[...events].reverse().find(e=>(e.event||e.action)==='run_finished');
   const wantedSummary=Array.isArray(started.summary_metrics)?started.summary_metrics:[];
   const pushMetric=(label,value,cls)=>{
     if(value!==undefined&&value!==null&&value!=='')chips.push([label,value,cls]);
@@ -903,12 +927,13 @@ function renderStats(){
 
 function activityStrip(flatRecords, errors){
   if(!sel)return '';
-  const last=all[all.length-1]||{};
-  const started=[...all].find(e=>(e.event||e.action)==='run_started')||{};
-  const finished=[...all].reverse().find(e=>['run_finished','run_failed'].includes(e.event||e.action));
-  const dry=[...all].reverse().find(e=>e.dry_run!==undefined);
+  const events=attemptEvents();
+  const last=events[events.length-1]||{};
+  const started=[...events].find(e=>(e.event||e.action)==='run_started')||{};
+  const finished=[...events].reverse().find(e=>['run_finished','run_failed'].includes(e.event||e.action));
+  const dry=[...events].reverse().find(e=>e.dry_run!==undefined);
   const dryText=dry ? (dry.dry_run?'Dry run · no writes':'Live run · writes enabled') : 'Write mode unknown';
-  const lastRecord=[...all].reverse().find(e=>(e.event||e.action)==='record')||{};
+  const lastRecord=[...events].reverse().find(e=>(e.event||e.action)==='record')||{};
   const currentRow=flatRecords.find(({row})=>String(row.status||'').toLowerCase()==='running');
   const lastAge=relAge(last.ts);
   const stale=!finished && parseTs(last.ts) && Date.now()-parseTs(last.ts)>60000;
@@ -954,8 +979,8 @@ function activityStrip(flatRecords, errors){
     ? `${flatRecords.filter(({row})=>String(row.status||'').toLowerCase()==='done').length} / ${started.todo}`
     : flatRecords.length
       ? `${flatRecords.length} records`
-      : all.length
-        ? `${all.length} events`
+      : events.length
+        ? `${events.length} events`
         : 'No events yet';
   return `<div class="activity ${cls}">
     <div><span class=k>Status</span><span class="v ${cls==='failed'?'err':cls==='stale'?'warn':cls==='done'?'info':'ok'}">${state}</span></div>
