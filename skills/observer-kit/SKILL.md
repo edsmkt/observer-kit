@@ -38,8 +38,10 @@ python3 workflow.py --full-run
 - `run_dashboard.py`: standalone viewer; run one instance pointed at a ledger dir.
 - `watch_chat.py`: run-scoped watcher for dashboard notes.
 - `observer_hook.py`: optional Claude Code hook for run-start reminders.
-- `README.md`: detailed event vocabulary and dashboard behavior.
-- `BUILD-GUIDE.md`: rebuild/acceptance-test reference.
+- `references/pattern.md`: load only for detailed event vocabulary, dashboard behavior,
+  parallelism, or adaptation guidance.
+- `references/build-guide.md`: load only when rebuilding the stack or debugging
+  acceptance-test details.
 
 Run `python3 test_runguard.py` after changing the safety core.
 

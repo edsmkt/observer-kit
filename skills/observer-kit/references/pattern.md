@@ -4,6 +4,19 @@ A three-piece pattern for any project where scripts spend money (API credits) or
 mutate shared state (CRM, database). Give this folder to a project agent and say
 "replicate this" — everything is stdlib-only Python, no dependencies.
 
+## Contents
+
+- The three pieces
+- Why it exists
+- The boring default contract
+- Required sample gate
+- Event vocabulary
+- Parallel datasets and shared-API throttling
+- Input/output sources
+- How to adapt to a new project
+- Scaling path
+- Files
+
 ## The three pieces
 
 1. **`runguard.py`** — exclusivity + audit trail

@@ -13,6 +13,15 @@ flock-based throttle.
 
 ---
 
+## Contents
+
+- 0. The problem this solves
+- 1. Build `runguard.py`
+- 2. Instrument your worker scripts
+- 3. Build `run_dashboard.py`
+- 4. Acceptance tests
+- 5. Known pitfalls
+
 ## 0. The problem this solves (read before building)
 
 Batch scripts that spend money (per-lookup API credits) or mutate shared state

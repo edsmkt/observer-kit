@@ -168,8 +168,8 @@ python3 example_worker.py --table alpha   # a second copy REFUSES — the guard 
 | `EXPLAIN.md` | Template for the plain-English + ASCII "statement of intent" |
 | `example_worker.py` | Runnable end-to-end example (parallel datasets + throttle) |
 | `test_runguard.py` | Acceptance tests for the safety core (lock exclusivity, stale-lock takeover, re-entrancy, scope isolation, ledger append/continuity, cross-process throttle). Run it after vendoring `runguard.py` to prove the guards hold |
-| `README.md` | The full pattern, event vocabulary, safety rules |
-| `BUILD-GUIDE.md` | Rebuild the whole stack from scratch, with acceptance tests |
+| `references/pattern.md` | The full pattern, event vocabulary, dashboard behavior, safety rules |
+| `references/build-guide.md` | Rebuild the whole stack from scratch, with acceptance tests |
 
 ## License
 
