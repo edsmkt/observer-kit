@@ -1263,7 +1263,7 @@ function renderStats(){
         pushMetric(label, fin[key], item.cls||outcomeClass(key)||'ok');
       }
     }else if(fin){
-      const defaults=['processed','qualified','saas_true','emails_enriched','sheet_rows_appended','errors'];
+      const defaults=['processed','qualified','saas_true','emails_enriched','sheet_rows_appended','credits_spent','errors'];
       for(const key of defaults){
         if(fin[key]!==undefined)pushMetric(key.replace(/_/g,' '),fin[key],key==='errors'?'err':'ok');
       }

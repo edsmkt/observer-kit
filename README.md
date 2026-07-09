@@ -2,6 +2,8 @@
 
 <p align="center"><strong>For when your agent does the data work, but you still need to see it.</strong></p>
 
+<p align="center">A local workflow harness for agent-run data transformation.</p>
+
 <p align="center">
   <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-3776AB?style=flat-square" />
   <img alt="Platform macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-4D8D6E?style=flat-square" />

@@ -175,6 +175,8 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
        '.recordshell th.datafirst{left:54px' in dashboard.PAGE)
     ok("generic rows render their prior value after an in-place update",
        'const previous=row.__prev?.[c];' in dashboard.PAGE and 'was ${esc(fmt(previous))}' in dashboard.PAGE)
+    ok("completed runs surface reported credit spend without custom dashboard wiring",
+       "'sheet_rows_appended','credits_spent','errors'" in dashboard.PAGE)
 
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)
