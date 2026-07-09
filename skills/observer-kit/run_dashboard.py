@@ -673,6 +673,12 @@ function attemptEvents(){
   const idx=latestAttemptIndex();
   return idx>=0 ? all.slice(idx) : all;
 }
+function progressEvents(){
+  return attemptEvents().filter(e=>{
+    const a=eventName(e);
+    return a==='progress'||a==='checkpoint'||e.done!==undefined||e.total!==undefined||e.phase!==undefined;
+  });
+}
 function priorAttemptEvents(){
   const idx=latestAttemptIndex();
   return idx>0 ? all.slice(0,idx) : [];
@@ -784,6 +790,31 @@ function render(){
           cols.map(c=>`<td data-col="${esc(recTab+'::'+c)}">${gcell(c,r[c])}${gwas(r.__prev[c])}</td>`).join('')+`</tr>`;
       }).join('')+'</table></div>'+(hasSubtabs?'</div>':'');
     content.innerHTML=html||'<div class=empty>No records yet.</div>';
+    decorateChat();
+    return;
+  }
+  const progEvents=progressEvents();
+  if(progEvents.length&&view!=='attention'){
+    const latestByPhase={};
+    for(const e of progEvents){
+      const phase=String(e.phase||e.checkpoint||e.event||e.action||'progress');
+      latestByPhase[phase]=e;
+    }
+    const rows=Object.values(latestByPhase).sort((a,b)=>String(a.phase||'').localeCompare(String(b.phase||'')));
+    const cols=['phase','done','total','percent','last update','note'];
+    const width={phase:260,done:100,total:100,percent:110,'last update':140,note:360};
+    const cell=(e,c)=>{
+      if(c==='percent'&&e.done!==undefined&&e.total)return Math.round((Number(e.done)/Number(e.total))*100)+'%';
+      if(c==='last update')return relAge(e.ts);
+      return fmt(e[c]);
+    };
+    const totalW=cols.reduce((s,c)=>s+width[c],0);
+    content.innerHTML=attemptBanner()+
+      `<div class=card><h4>Live progress</h4><div class=row><small>No record rows have landed for this attempt yet. Showing progress events from the JSONL as they arrive.</small></div></div>`+
+      `<div class=tablewrap><table style="width:${totalW}px"><tr>${cols.map(c=>`<th data-col="progress::${esc(c)}" style="width:${width[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr>`+
+      rows.map(e=>`<tr data-key="${esc(e.phase||e.checkpoint||'progress')}" data-co="${esc(e.phase||'progress')}" data-name="${esc(e.phase||'progress')}">`+
+        cols.map(c=>`<td data-col="progress::${esc(c)}">${esc(cell(e,c))}</td>`).join('')+`</tr>`).join('')+
+      `</table></div>`;
     decorateChat();
     return;
   }
@@ -917,6 +948,15 @@ function renderStats(){
       const primary=recTab&&recByTable[recTab]?recTab:tables[0];
       if(primary)pushMetric(`${primary} rows`, Object.keys(recByTable[primary]).length);
     }
+  } else if(progressEvents().length){
+    const latest=progressEvents()[progressEvents().length-1];
+    const phase=latest.phase||latest.checkpoint||'progress';
+    if(latest.done!==undefined&&latest.total!==undefined){
+      chips.push([phase, `${latest.done}/${latest.total}`, 'info']);
+      chips.push(['complete', Math.round((Number(latest.done)/Number(latest.total))*100)+'%', 'ok']);
+    }else{
+      chips.push([phase, fmt(latest.value??latest.done??latest.total??'live'), 'info']);
+    }
   } else if(enrichRun){
     chips.push(['phones found',s.phones],['emails found',s.emails]);
     if(s.misses)chips.push(['no result',s.misses]);
@@ -985,6 +1025,8 @@ function activityStrip(flatRecords, errors){
     ? `${flatRecords.filter(({row})=>String(row.status||'').toLowerCase()==='done').length} / ${started.todo}`
     : flatRecords.length
       ? `${flatRecords.length} records`
+      : last.done!==undefined&&last.total!==undefined
+        ? `${last.done} / ${last.total}`
       : events.length
         ? `${events.length} events`
         : 'No events yet';
