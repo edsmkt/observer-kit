@@ -50,6 +50,7 @@ if '--port' in sys.argv:
 CHAT_FILE = os.path.join(SOURCES['runguard'], 'chat.jsonl')
 ACTIVE_S = 120   # a file touched in the last 2 min counts as live
 EVENT_READ_BYTES = 512 * 1024
+RUN_DESC_READ_BYTES = 2 * 1024 * 1024
 
 
 def _first_event(path):
@@ -59,6 +60,35 @@ def _first_event(path):
         return json.loads(line) if line else {}
     except Exception:
         return {}
+
+
+def _summary_event(path):
+    """Use the latest run_started near the head of the ledger for run labels.
+
+    Dry-run and full-run attempts often share one JSONL lane. The dashboard table
+    shows the latest attempt, so the sidebar description should not stay pinned
+    to the first dry-run event.
+    """
+    first = {}
+    latest = {}
+    try:
+        with open(path, 'rb') as f:
+            chunk = f.read(RUN_DESC_READ_BYTES)
+        for line in chunk.decode('utf-8', 'replace').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not first:
+                first = rec
+            if (rec.get('event') or rec.get('action')) == 'run_started':
+                latest = rec
+    except Exception:
+        return {}
+    return latest or first
 
 
 def _describe(first):
@@ -104,7 +134,7 @@ def list_runs():
                 mtime = os.path.getmtime(ev)
                 name, when = _nice_name(d, 'push')
                 runs.append({'id': f'push:{d}', 'label': d, 'name': name, 'when': when,
-                             'desc': _describe(_first_event(ev)), 'kind': 'push',
+                             'desc': _describe(_summary_event(ev)), 'kind': 'push',
                              'path': os.path.abspath(os.path.join(push_dir, d)),
                              'mtime': mtime, 'live': now - mtime < ACTIVE_S})
     for kind in ('enrich', 'runguard'):
@@ -116,7 +146,7 @@ def list_runs():
                     mtime = os.path.getmtime(p)
                     name, when = _nice_name(f, kind)
                     runs.append({'id': f'{kind}:{f}', 'label': f, 'name': name, 'when': when,
-                                 'desc': _describe(_first_event(p)), 'kind': kind,
+                                 'desc': _describe(_summary_event(p)), 'kind': kind,
                                  'path': os.path.abspath(p),
                                  'mtime': mtime, 'live': now - mtime < ACTIVE_S})
     runs.sort(key=lambda r: -r['mtime'])

@@ -28,10 +28,14 @@ print(f"Testing run_dashboard.py at {RUN_DASHBOARD}\n")
 
 with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     dashboard.SOURCES['runguard'] = state
+    dashboard.SOURCES['push'] = os.path.join(state, 'missing-push')
+    dashboard.SOURCES['enrich'] = os.path.join(state, 'missing-enrich')
     dashboard.EVENT_READ_BYTES = 80
     ledger = os.path.join(state, 'large-run.jsonl')
     rows = [
-        {'ts': '2026-07-09T12:00:00', 'event': 'run_started', 'todo': 2},
+        {'ts': '2026-07-09T12:00:00', 'event': 'run_started', 'description': 'old dry-run attempt', 'todo': 1},
+        {'ts': '2026-07-09T12:00:01', 'event': 'record', 'table': 'companies', 'key': 'old'},
+        {'ts': '2026-07-09T12:01:00', 'event': 'run_started', 'description': 'latest large dashboard check', 'todo': 2},
         {
             'ts': '2026-07-09T12:00:01',
             'event': 'record',
@@ -46,13 +50,20 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
         for row in rows:
             fh.write(json.dumps(row) + '\n')
 
-    events, offsets = dashboard.read_events('runguard:large-run.jsonl', {})
-    ok("chunked read keeps full JSONL records", [e.get('key') for e in events if e.get('event') == 'record'] == ['big'])
+    offsets = {}
+    seen = []
+    for _ in range(10):
+        events, offsets = dashboard.read_events('runguard:large-run.jsonl', offsets)
+        seen.extend(e.get('key') for e in events if e.get('event') == 'record')
+        if list(offsets.values())[0] == os.path.getsize(ledger):
+            break
+    ok("chunked read keeps full JSONL records", seen == ['old', 'big', 'small'], str(seen))
     ok("chunked read advances beyond the large record", list(offsets.values())[0] > 80)
+    ok("chunked reads eventually reach end", list(offsets.values())[0] == os.path.getsize(ledger))
 
-    events2, offsets2 = dashboard.read_events('runguard:large-run.jsonl', offsets)
-    ok("next read continues after completed large record", [e.get('key') for e in events2] == ['small'])
-    ok("offset reaches end after second read", list(offsets2.values())[0] == os.path.getsize(ledger))
+    runs = dashboard.list_runs()
+    desc = next((r.get('desc') for r in runs if r.get('label') == 'large-run.jsonl'), '')
+    ok("run list describes the latest attempt", desc == 'latest large dashboard check', desc)
 
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)
