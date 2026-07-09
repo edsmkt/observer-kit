@@ -818,11 +818,31 @@ function activityStrip(flatRecords, errors){
     state='Running';
     cls='live';
   }
-  const current=currentRow
-    ? `${currentRow.table}: ${currentRow.row.step||currentRow.row.key||currentRow.row.company||'record'}`
-    : lastRecord.step
-      ? `${lastRecord.table||'records'}: ${lastRecord.step}`
-      : humanize(last).text?.replace(/<[^>]+>/g,'') || 'No events yet';
+  const terminalSummary=(e)=>{
+    if(!e)return '';
+    if((e.event||e.action)==='run_failed')return `Failed · ${String(e.error||'see Run info').slice(0,90)}`;
+    const priority=['with_contacts','no_contacts','total_contacts','processed','credits_spent','errors'];
+    const parts=[];
+    for(const k of priority){
+      if(e[k]!==undefined)parts.push(`${e[k]} ${k.replace(/_/g,' ')}`);
+      if(parts.length>=3)break;
+    }
+    if(!parts.length){
+      for(const [k,v] of Object.entries(e)){
+        if(['ts','event','action','_file','status','dry_run','checkpoints'].includes(k)||typeof v==='object')continue;
+        parts.push(`${v} ${k.replace(/_/g,' ')}`);
+        if(parts.length>=3)break;
+      }
+    }
+    return parts.length ? `Finished · ${parts.join(' · ')}` : 'Finished · see Run info';
+  };
+  const current=finished
+    ? terminalSummary(finished)
+    : currentRow
+      ? `${currentRow.table}: ${currentRow.row.step||currentRow.row.key||currentRow.row.company||'record'}`
+      : lastRecord.step
+        ? `${lastRecord.table||'records'}: ${lastRecord.step}`
+        : humanize(last).text?.replace(/<[^>]+>/g,'') || 'No events yet';
   const recordAttention=flatRecords.filter(({row})=>isAttentionRecord(row)).length;
   const attention=flatRecords.length ? recordAttention : errors;
   const progress=started.todo
