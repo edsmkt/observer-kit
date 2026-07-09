@@ -129,6 +129,20 @@ The full dataset should be an intentional action, not the default path.
 
 ## Install
 
+As a local CLI from this checkout:
+
+```bash
+python3 -m observer_kit --help
+```
+
+If you want the `observer-kit` console command, install from a Python
+environment where user/site packages are writable:
+
+```bash
+python3 -m pip install -e .
+observer-kit --help
+```
+
 Into your user scope (available in every project you open):
 
 ```bash
@@ -149,12 +163,24 @@ state-mutating batch script.
 
 ```bash
 git clone https://github.com/edsmkt/observer-kit
-cd observer-kit/skills/observer-kit
-python3 test_runguard.py          # verify the safety core — 15 checks, all pass
-python3 run_dashboard.py          # open http://localhost:8484, pick the sample run
-python3 example_worker.py --table alpha   # watch a run fill the table live
-python3 example_worker.py --table alpha   # a second copy REFUSES — the guard working
+cd observer-kit
+python3 -m observer_kit test       # verify the safety core — 15 checks, all pass
+python3 -m observer_kit dashboard skills/observer-kit/.runguard
+python3 skills/observer-kit/example_worker.py --table alpha
+python3 skills/observer-kit/example_worker.py --table alpha  # second copy REFUSES
 ```
+
+## CLI
+
+```bash
+observer-kit init ./my-project
+observer-kit dashboard ./my-project/.runguard --port 8484
+observer-kit test
+observer-kit doctor ./my-project
+```
+
+`init` vendors `runguard.py`, creates `.runguard`, copies the `EXPLAIN.md`
+template, and writes a small `.runguard/.gitignore`.
 
 ## What's inside `skills/observer-kit/`
 
