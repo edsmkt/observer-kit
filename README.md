@@ -1,282 +1,222 @@
-# observer-kit
+# Observer Kit
 
-Guardrails and a live localhost dashboard for any script that **spends API
-credits** or **mutates shared state** (CRM, database, spreadsheets) — packaged
-as an installable agent skill.
+### For when your agent does the data work, but you still need to see it.
 
-It gives batch / enrichment / scraping scripts three things, all stdlib-only,
-no dependencies:
+![Observer Kit data view](assets/per-company.png)
 
-- **Run locks** — a second accidental run refuses to start, so nothing
-  double-spends or corrupts data. Crash-safe: recovery is "just re-run", never a
-  manual cleanup.
-- **An audit ledger + cross-process rate limiting** — every submission, result,
-  and credit recorded; parallel runs share one rate budget per provider.
-- **A boring default wrapper** — `start_observed_run(...)` gives new scripts a
-  run id, lock, dry-run flag, visible step rows, counters, checkpoints, and
-  `success()` / `fail()` lifecycle closure without inventing a run harness.
-- **Optional delivery guardrails** — input fingerprints, impact previews,
-  declarative schema/policy checks, write intents and receipts, dead-letter
-  replay candidates, provenance, quality gates, and durable pause requests for
-  workflows that move data between systems.
-- **A read-only web dashboard** (`http://localhost:8484`) — a live per-record
-  table, an at-a-glance activity strip, an Attention tab for failures/refusals,
-  a plain-English timeline, a run-info tab, and a **"How it works"** tab that
-  renders a plain-English + ASCII `EXPLAIN.md` so a non-technical operator can
-  verify what a run is doing and stop it if it's wrong.
+Data transformation used to happen in familiar places: a database query, a
+spreadsheet, a table you could watch change row by row. Now an agent can pull
+records, enrich them, and write the results back while you wait in a chat.
 
-## What it looks like
+That is fast, but it is hard to review. You cannot see what landed, spot a bad
+row early, or tell the agent exactly what needs to change while the workflow is
+still running.
 
-**Data** — one row per item; columns are whatever the run logs, and pills fill in live as results land:
+Observer Kit turns an agent-run data transformation into a reviewable working
+session. It gives you a live local dashboard where you can see rows arrive,
+inspect what changed, message the agent about a specific record, and pause the
+run safely when something needs attention.
 
-![Data view](assets/per-company.png)
+Use it for imports, database exports, enrichment, backfills, CRM updates,
+spreadsheet pushes, and any other job that changes or moves many records.
 
-**Timeline** — every step in plain English, newest work as it happens:
+It gives the collaboration loop a few simple pieces:
+
+- **A live table**: see the actual source rows and outcomes as work lands.
+- **A review conversation**: point the agent at a row or message it about the
+  whole run.
+- **Safe controls**: pause at a checkpoint, stop after the current record, and
+  approve a full run only after reviewing a sample.
+- **An agent playbook and small CLI**: the agent builds the workflow; the CLI
+  provides the repeatable local plumbing.
+
+## How It Works
+
+```text
+Agent adapts the real workflow
+            |
+            v
+Small sample runs first and fills the dashboard
+            |
+            v
+You inspect rows, message the agent, or pause safely
+            |
+            v
+The agent fixes, continues, or starts the approved full run
+```
+
+The same run can continue after a fix. Existing rows update in place, so you
+see what changed instead of losing the earlier attempt.
+
+## Dashboard
+
+The dashboard runs only on localhost. It reads the JSONL ledger the workflow
+writes while it works.
+
+The **Data** tab shows one row per source item. The columns come from the
+workflow itself: a company-sourcing run might show domains, qualification,
+LinkedIn, email, and sheet status; another workflow might show entirely
+different fields.
 
 ![Timeline view](assets/timeline.png)
 
-**How it works** — a plain-English + ASCII "statement of intent" (from
-`EXPLAIN.md`) the operator reads to confirm what a run will do *before* it spends:
+The **Timeline** is the plain-English history of the run. **Attention** focuses
+on records that need a look. **How it works** shows the workflow's `EXPLAIN.md`
+statement of intent.
 
-![How it works view](assets/how-it-works.png)
+### Talk To The Agent
 
-**Collaborate on a sample** — click any column header or cell to chat with the
-agent, anchored to that exact spot. The intended loop: the agent runs a small
-sample, you leave notes on what to change, it replies and marks them ✓, and the
-next run shows **before/after** inline (`· was X`) so you see what changed —
-before committing the full (expensive) run.
+- **Command-click** a table cell or column header to open a conversation about
+  that exact spot. (`Ctrl-click` works on non-macOS systems.)
+- Use **Message agent** in the run monitor to discuss the whole run, especially
+  after it has paused or finished.
+- The agent receives these notes through the run watcher, replies in the same
+  thread, and can update the script or resume the run.
 
-![Inline chat anchored to a cell](assets/collaborate.png)
+### Run Controls
 
-## Any workflow, any columns
+During an active run, the monitor offers:
 
-The dashboard is **not** hardcoded to contacts/phones/emails. Log a generic
-`record` event and the **Data** tab builds a table whose columns are exactly the
-fields you logged — for *any* pipeline:
+- **Pause**: requests a pause at the script's next safe checkpoint.
+- **Stop after this record**: lets the current record finish, then pauses.
+- **Approve full run**: appears after a dry-run sample and records your approval
+  for the agent to start the intentional full-run command.
 
-```python
-# log where each row came FROM and went TO — lineage is just more columns
-runguard.ledger('my-run', 'record', table='companies', key=domain,
-                company=domain, source='northdata',        # pulled_from
-                condition='met', supabase='inserted',       # per-sink outcomes
-                hubspot='pushed', csv='written', status='done')
-```
-
-- **`table`** groups records into separate **sub-tabs** — a multi-step workflow
-  emits a different shape at each step (e.g. `companies` → `contacts` → `enriched`),
-  each its own table, so a later step's rows don't bury an earlier one's.
-- **`key`** is the row identity — repeat it to update a row in place; a changed
-  value renders `· was X` (before/after). Log the outcome onto the same key at each
-  step and the row accumulates its whole path (source → each sink).
-- Every other field becomes a **column**, in first-seen order. A destination
-  (`supabase`, `hubspot`, `cloudflare`, `csv`, a webhook…) or a source is just a
-  column — there's no fixed list.
-- **Outcome columns auto-color**: values are classed green (`done/ok/inserted/pushed/
-  written/created/appended`), amber (`skipped/not met/held/pending`), red (`fail/
-  error/refused/4xx/5xx`), grey (`—`/not attempted) by a universal vocabulary — no
-  per-workflow config. So "what landed where" reads straight off the colored cells.
-- **Top bar stays lean**: per-table row counts (companies, people…), the run's own
-  headline totals from `run_finished` (e.g. `emails_found`), and credits used — not
-  a per-value dump.
-- Table UX applies everywhere: first column frozen on horizontal scroll, sticky
-  header on vertical scroll, drag a header edge to resize, double-click a cell to
-  expand long values, click any cell/header to chat.
-
-The bundled contact-enrichment view (phones/emails/CRM pills) is just the *example*
-renderer that kicks in for `phone_found`/`email_found` events — remove it or ignore
-it; `record` events are the general path.
-
-## The boring wrapper
-
-For new scripts, use the small helper instead of hand-assembling the lock,
-ledger, dry-run, counters, and lifecycle every time:
-
-```python
-from runguard import start_observed_run
-
-run = start_observed_run('enrich-leads', dry_run=args.dry_run, todo=len(leads))
-
-try:
-    for lead in leads:
-        with run.step('enrich_lead', table='companies', key=lead.id,
-                      company=lead.domain):
-            enriched = enrich_lead(lead)
-            if not run.dry_run:
-                update_crm_lead(lead.id, enriched)
-            run.count('leads_enriched')
-            run.checkpoint('last_lead', lead.id)
-
-    run.success(processed=len(leads))
-except Exception as exc:
-    run.fail(exc)
-    raise
-```
-
-Drop to `acquire_lock()` + `ledger()` only when a pipeline needs custom event
-vocabulary. The default path is meant to stay small enough to add in minutes.
-
-## Moving data between systems
-
-For a CRM, spreadsheet, database, API, webhook, or file sink, the wrapper can
-add only the safeguards the workflow needs: `input_snapshot(...)` before review,
-`run.preview(...)` for the sample, `run.validate(...)` / `run.allow_write(...)`
-before a mutation, then `run.write_intent(...)` and `run.write_receipt(...)`
-around the confirmed sink call. `run.reconcile()` makes intended, written,
-verified, pending, skipped, and replayable records explicit.
-
-Use `record_table=`, `outcome=`, and optionally `outcome_field=` on the receipt
-to update the same entity row in place: `google_sheet: pending` becomes
-`google_sheet: appended`, `hubspot: updated`, or another sink-specific outcome.
-
-The intent ticket contains a stable `operation_key`; pass it to a provider's
-idempotency-key feature when available. A retry with a pending prior intent
-raises `PendingWrite` rather than risk a duplicate write. Failed records stay as
-small dead-letter candidates, and the dashboard can request a pause or
-stop-after-record at a script-defined safe checkpoint. The active agent session
-remains the brain throughout.
-
-## Default run policy
-
-For workflows that spend credits, scrape in bulk, send messages, or write to a
-CRM/database/spreadsheet, start with a small dry-run sample and get explicit
-approval before the full run.
-
-Recommended CLI shape:
-
-```bash
-python3 workflow.py --dry-run --limit 10   # sample only; review dashboard
-python3 workflow.py --limit 10             # optional live sample after approval
-python3 workflow.py --full-run             # full run only after explicit approval
-```
-
-The full dataset should be an intentional action, not the default path.
+Clicking Pause or Stop sends the control request immediately and opens the
+normal chat so you can explain what the agent should inspect. A green check
+means the worker acknowledged the request. The dashboard does not kill a
+process; the script pauses at a checkpoint where its durable state is safe.
 
 ## Install
 
-As a local CLI from this checkout:
+Install the skill for all local projects:
+
+```bash
+npx skills add edsmkt/observer-kit -g
+```
+
+Or add it only to the current project:
+
+```bash
+npx skills add edsmkt/observer-kit
+```
+
+The Python CLI also runs directly from this checkout:
 
 ```bash
 python3 -m observer_kit --help
 ```
 
-If you want the `observer-kit` console command, install from a Python
-environment where user/site packages are writable:
+For the `observer-kit` command, install into a writable Python environment:
 
 ```bash
 python3 -m pip install -e .
 observer-kit --help
 ```
 
-Into your user scope (available in every project you open):
+## Start A Project
+
+From the project containing your workflow script:
 
 ```bash
-npx skills add edsmkt/observer-kit -g
+observer-kit init .
+observer-kit dashboard .runguard --port 8484
 ```
 
-Or into a single project's `./.claude/skills/`:
+`init` adds the small Python helper, a private `.runguard` state directory, and
+an `EXPLAIN.md` template. Keep the dashboard running while the agent works.
+
+Then ask your agent to wire Observer Kit into the real script. A typical first
+run is:
 
 ```bash
-npx skills add edsmkt/observer-kit
+observer-kit run --state-dir .runguard --dashboard -- \
+  python3 enrich_companies.py --dry-run --limit 10
 ```
 
-Then, in any project, ask your agent to "wire in observer-kit" — or it will
-reach for the skill on its own when it's about to write a credit-spending or
-state-mutating batch script.
-
-## Try it in 30 seconds
+After you review the sample and explicitly approve it:
 
 ```bash
-git clone https://github.com/edsmkt/observer-kit
-cd observer-kit
-python3 -m observer_kit test       # run the full Observer Kit acceptance suite
-python3 -m observer_kit dashboard skills/observer-kit/.runguard
-python3 skills/observer-kit/example_worker.py --table alpha
-python3 skills/observer-kit/example_worker.py --table alpha  # second copy REFUSES
+observer-kit run --state-dir .runguard -- \
+  python3 enrich_companies.py --full-run
 ```
 
-## CLI
+`observer-kit run` attaches to an existing dashboard, starts the command, and
+connects the run watcher. It does not make decisions or approve a full run for
+you.
+
+## A Simple Script
+
+For a new Python workflow, the helper keeps the integration small:
+
+```python
+from runguard import start_observed_run
+
+run = start_observed_run(
+    'enrich-leads',
+    source=args.input,
+    dry_run=args.dry_run,
+    todo=len(leads),
+    progress_table='companies',
+)
+
+try:
+    for lead in leads:
+        run.check_controls()
+        with run.step('enrich_lead', table='companies', key=lead.id,
+                      company=lead.domain):
+            result = enrich_lead(lead)
+            if not run.dry_run:
+                update_crm_lead(lead.id, result)
+            run.count('processed')
+            run.checkpoint('last_lead', lead.id)
+    run.success(processed=len(leads))
+except Exception as exc:
+    run.fail(exc)
+    raise
+```
+
+The important part is simple: emit each row while the real work happens. The
+dashboard then stays live, and a restart can continue from durable progress.
+
+## For Builders
+
+Observer Kit provides practical safety pieces when a workflow needs them:
+
+- Source-based run locks and durable checkpoints for safe restarts.
+- Append-only JSONL ledgers for live records, progress, and audit history.
+- Shared provider throttling across local processes.
+- Input snapshots, sample previews, validation, policy checks, and quality gates.
+- Write intents and receipts for CRM, spreadsheet, database, file, webhook, and
+  API delivery steps.
+- Reconciliation and targeted replay candidates for incomplete work.
+
+Use the workflow's real source identity for `source=`: a resolved file path,
+Sheet or export ID, table plus query identity, or similar stable identifier.
+That lets Observer Kit identify the same dataset across retries and show its
+history in one run lane.
+
+For implementation patterns and event vocabulary, see
+[skills/observer-kit/references/pattern.md](skills/observer-kit/references/pattern.md).
+The agent skill is at [skills/observer-kit/SKILL.md](skills/observer-kit/SKILL.md).
+
+## CLI Reference
 
 ```bash
-observer-kit init ./my-project
-observer-kit dashboard ./my-project/.runguard --port 8484
-observer-kit watch ./my-project/.runguard --run runguard:my-run.jsonl --follow
-observer-kit watch ./my-project/.runguard --all --follow
-observer-kit run --state-dir ./my-project/.runguard --dashboard -- python3 enrich_companies.py --dry-run --limit 10
-observer-kit run --state-dir ./my-project/.runguard --session auto -- python3 enrich_companies.py --full-run
-observer-kit reply ./my-project/.runguard --run runguard:my-run.jsonl --anchor cell:companies:2 --text "Fixed this and reran the sample."
+observer-kit init [project]
+observer-kit dashboard [state_dir] --port 8484
+observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
+observer-kit watch .runguard --run runguard:my-run.jsonl --follow
+observer-kit reply .runguard --run runguard:my-run.jsonl --anchor run --text "I fixed this."
+observer-kit doctor [project]
 observer-kit test
-observer-kit doctor ./my-project
 ```
 
-`init` vendors `runguard.py` and `watch_chat.py`, creates `.runguard`, copies
-the `EXPLAIN.md` template, and writes a `.runguard/.gitignore` that keeps local
-locks, throttles, chat, and ledger JSONL data out of Git.
+Run the full acceptance suite from this repository with:
 
-`watch` is a harness bridge, not an agent. It reads dashboard chat for one run
-and emits structured `OBSERVER_CHAT_EVENT ...` lines to stdout so the active
-Codex/Claude/Goose/etc. session can decide what to inspect, patch, rerun, or
-reply. Observer Kit is the observed run substrate and event transport; the
-harness thread/session remains the brain. The harness must run or monitor this
-stdout bridge for notes to wake the active session.
-
-For a long-lived dashboard server, prefer `observer-kit watch .runguard --all
---follow` in the active harness session. It bridges notes from any run in that
-dashboard state directory, including completed runs the operator clicks later.
-
-`run` is the convenience launcher for agent-started pipelines. It sets
-`RUNGUARD_STATE_DIR`, optionally starts the dashboard, runs the command you pass
-after `--`, detects the `OBSERVER_RUN_STARTED` marker from `runguard.py`, and
-connects the scoped watcher for that run. After the child command exits, the
-dashboard/watch bridge stays alive for sample review until Ctrl-C; use
-`--exit-after-run` when you want smoke-test behavior. It does not approve full
-runs or make workflow decisions.
-
-For failure recovery on the same source data, keep the same lane: omit
-`--session`, or pass the same stable session name again. The retry appends to the
-same ledger so the operator sees the failed attempt, checkpoints, fixes, and
-successful continuation in one dashboard run. Same-mode retries retain prior
-record rows and update stable `table` + `key` values in place; a dry-run remains
-separate from the later live table.
-
-For new workflows, prefer `source=<actual source identity>` in
-`start_observed_run()` rather than hand-writing a lock label. Use the resolved
-CSV path, Google Sheet ID, database table/query identity, or export ID. The kit
-derives the lock scope from that identity. If that source is already running,
-wait for it to finish or deliberately stop the named PID before starting fresh.
-A duplicate run can create duplicate provider charges, CRM or sheet writes, and
-corrupted history.
-
-Use `--session auto` only when you intentionally want a fresh historical run in
-the same dashboard state directory, such as a new batch, weekly import, or demo
-run. Without a session, `runguard.py` keeps appending to the same source-scoped
-ledger so reruns show before/after in one continuous lane.
-
-When a dashboard note asks the agent to change the script, choose the lane based
-on operator intent. Fixing or continuing the same dataset should reuse the same
-lane, table names, and row keys so updated cells render in place with
-before/after values. A clean redo or comparison should use a new session so it
-appears as a separate dashboard run.
-
-Parallel runs should share a lock scope unless their input records are provably
-disjoint. If two sessions might touch the same website, contact, account, row,
-or external object, run them serially. `throttle()` protects provider rate
-limits; it does not prevent duplicate work on overlapping records.
-
-## What's inside `skills/observer-kit/`
-
-| File | What it is |
-|------|-----------|
-| `SKILL.md` | Agent entry point — when to use it and how to wire it in |
-| `runguard.py` | Locks + append-only ledger + cross-process throttle — **a library; vendor it into your project** (your script imports it) |
-| `run_dashboard.py` | The localhost observer — **a standalone app; run ONE instance** pointed at any project's ledger dir (`python3 run_dashboard.py <dir>`), don't vendor it per-project |
-| `watch_chat.py` | Run-scoped chat watcher — surfaces the operator's dashboard notes for **one** run so the right agent session gets them (multi-session safe). Wire into your harness's wake-up (Claude Code: the Monitor tool) |
-| `observer_hook.py` | Claude Code PostToolUse hook — catches the `run_started` marker and reminds the agent to start that run's watcher. Add to `.claude/settings.json` on setup (see SKILL) |
-| `EXPLAIN.md` | Template for the plain-English + ASCII "statement of intent" |
-| `example_worker.py` | Runnable end-to-end example (parallel datasets + throttle) |
-| `test_runguard.py` | Acceptance tests for the safety core (advisory lock exclusivity, crash recovery, re-entrancy, scope isolation, safe state paths, ledger continuity, terminal failure events, and cross-process throttle). Run it after vendoring `runguard.py` to prove the guards hold |
-| `test_lint_emit.py`, `test_dashboard.py`, `test_cli.py` | Acceptance tests for the live-emission linter, dashboard JSONL reader, and end-to-end CLI lifecycle. `observer-kit test` runs these with the safety-core tests |
-| `references/pattern.md` | The full pattern, event vocabulary, dashboard behavior, safety rules |
-| `references/build-guide.md` | Rebuild the whole stack from scratch, with acceptance tests |
+```bash
+python3 -m observer_kit test
+```
 
 ## License
 

@@ -566,6 +566,7 @@ For persistent monitoring, prefer:
 
 Session rule:
   same source retry/adaptation = reuse the same session or omit --session
+  add enrichment to existing rows = reuse the same session, table, and keys
   clean comparison/new batch   = use --session auto or a new session name
 """,
     )

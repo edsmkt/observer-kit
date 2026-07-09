@@ -262,6 +262,10 @@ Choose the run lane deliberately:
 - Same source retry, fix, or dashboard-chat adaptation: keep the same lane
   (`--session <source-id>` or no session), same `table=`, and same `key=`.
   Rerun after patching so changed cells update in place.
+- Additional enrichment for rows already shown in the dashboard: keep that same
+  lane, `table=`, and `key=`. Write the new enrichment fields onto those
+  records so the existing table gains the new columns while retaining prior
+  results.
 - Clean redo, comparison, or new batch: use a new stable `--session <name>` or
   `--session auto` so the dashboard gets a separate run.
 
