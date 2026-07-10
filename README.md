@@ -68,7 +68,8 @@ writes while it works.
 The **Data** tab shows one row per source item. The columns come from the
 workflow itself: a company-sourcing run might show domains, qualification,
 LinkedIn, email, and sheet status; another workflow might show entirely
-different fields.
+different fields. Use **Filter columns** to combine text, category, and number
+filters while you inspect a large run.
 
 The **Timeline** is the plain-English history of the run. **Attention** focuses
 on records that need a look. **How it works** shows the workflow's `EXPLAIN.md`

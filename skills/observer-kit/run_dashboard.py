@@ -424,6 +424,15 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .card .row small{color:var(--dim)}
 .recordshell{height:calc(100vh - 214px);overflow:auto;border-radius:10px;background:var(--card);border:1px solid var(--line)}
 .recordshell .tablewrap{overflow:visible;max-height:none;border-radius:0}
+.tableTools{position:sticky;top:0;z-index:8;display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:8px 10px;background:#151c24;border-bottom:1px solid var(--line)}
+.filterToggle,.filterChip,.filterAction{background:#202a35;color:var(--txt);border:1px solid #344355;border-radius:7px;padding:5px 9px;cursor:pointer;font:12px -apple-system,"Segoe UI",sans-serif}
+.filterToggle:hover,.filterAction:hover{background:#2b3948;border-color:#4d6580}
+.filterChip{display:inline-flex;align-items:center;gap:5px;color:var(--dim);cursor:default}.filterChip button{border:0;background:transparent;color:var(--dim);padding:0;cursor:pointer;font-size:15px;line-height:1}.filterChip button:hover{color:var(--txt)}
+.filterGroup{display:inline-flex;align-items:center;gap:5px;padding:4px 5px;border:1px solid #425063;border-radius:7px;background:#1a2530}.filterGroup small{color:var(--dim);white-space:nowrap}.filterJoin{font-size:10px;color:var(--info)}
+.filterPanel{position:sticky;top:41px;z-index:8;display:grid;grid-template-columns:minmax(120px,1fr) minmax(112px,.8fr) minmax(105px,1fr) minmax(105px,1fr) minmax(130px,1fr) auto;gap:7px;align-items:center;padding:8px 10px;background:#121920;border-bottom:1px solid var(--line)}
+.filterPanel select,.filterPanel input{min-width:0;width:100%;background:#0d1114;color:var(--txt);border:1px solid #344355;border-radius:6px;padding:6px 8px;font:12px -apple-system,"Segoe UI",sans-serif}
+.filterPanel input:last-of-type[data-hidden="true"]{display:none}
+@media(max-width:720px){.filterPanel{grid-template-columns:1fr 1fr}.filterPanel .filterAction{grid-column:span 2}}
 .tablewrap{overflow:auto;max-height:calc(100vh - 150px);border-radius:10px;background:var(--card);border:1px solid var(--line)}
 .subtabs{position:sticky;top:0;left:0;z-index:8;display:flex;gap:6px;flex-wrap:wrap;padding:8px;background:#151c24;border-bottom:1px solid var(--line)}
 .subtab{padding:5px 12px;border-radius:7px;background:#202a35;color:var(--dim);cursor:pointer;font-size:12.5px;border:1px solid transparent}
@@ -431,7 +440,9 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .subtab.sel{background:#314052;color:var(--txt);border-color:#43566c}
 table{table-layout:fixed;border-collapse:separate;border-spacing:0;background:var(--card)}
 th{position:sticky;top:0;z-index:2;background:#242e3a;text-align:left;padding:9px 12px;font-size:11.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.recordshell.hasSubtabs th{top:43px}
+.recordshell th{top:41px}
+.recordshell.hasSubtabs .tableTools{top:43px}.recordshell.hasSubtabs .filterPanel{top:84px}
+.recordshell.hasSubtabs th{top:84px}.recordshell.filtersOpen th{top:84px}.recordshell.hasSubtabs.filtersOpen th{top:127px}
 td{padding:8px 12px;border-top:1px solid var(--line);vertical-align:top;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 tr:hover td{background:#232c36}
 /* freeze the first column so it stays visible when scrolling a wide table right */
@@ -521,8 +532,8 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
 </div>
 <script>
 let sel=null, offsets={}, all=[], view='records', chatByAnchor={}, chatOpenAnchor=null, pendingControl=null, controls=[], colW={}, recTab=null, currentLocks=[], _buildAbort=null;
-let _eventCount=-1, _lastView=null, _lastSel=null, _lastRecTab=null, _recGroupsCache=null, _recGroupsVer=0;
-const ATTENTION_RE=/(fail|error|refus|reject|timeout|exception|invalid|denied|blocked|stuck|\b[45]\d\d\b)/i;
+let tableFilters=Object.create(null), filterOpen=null, filterDraft=null, _filterVersion=0;
+let _eventCount=-1, _lastView=null, _lastSel=null, _lastRecTab=null, _lastFilterVersion=-1, _recGroupsCache=null, _recGroupsVer=0;
 function setRecTab(t){recTab=t;render();}
 const COLW_DEFAULT={Company:190,Person:150,Tier:80,Phone:170,Email:230,'CRM id':120};
 try{colW=JSON.parse(localStorage.getItem('observer_colw')||'{}')}catch(e){}
@@ -530,6 +541,21 @@ const content=document.getElementById('content');
 function contentViewportHeight(){return Math.max(260, content.clientHeight-28);}
 let autoscroll=true;
 content.addEventListener('scroll',()=>{autoscroll=content.scrollTop+content.clientHeight>content.scrollHeight-60});
+
+function captureTableScroll(){
+  const shell=content.querySelector('.recordshell');
+  return {contentTop:content.scrollTop, shellTop:shell?.scrollTop??0, shellLeft:shell?.scrollLeft??0};
+}
+function restoreTableScroll(state){
+  if(!state)return;
+  requestAnimationFrame(()=>{
+    content.scrollTop=Math.min(state.contentTop, Math.max(0,content.scrollHeight-content.clientHeight));
+    const shell=content.querySelector('.recordshell');
+    if(!shell)return;
+    shell.scrollTop=Math.min(state.shellTop, Math.max(0,shell.scrollHeight-shell.clientHeight));
+    shell.scrollLeft=Math.min(state.shellLeft, Math.max(0,shell.scrollWidth-shell.clientWidth));
+  });
+}
 
 // --- inline chat (v2): Command-click a column header or cell to leave an agent note ---
 // Chat and durable control requests are side channels. The dashboard never
@@ -789,7 +815,7 @@ function renderBridge(){
 function outcomeClass(v){
   const s=String(v).trim().toLowerCase();
   if(!s||s==='—'||s==='-'||s==='n/a'||s==='na')return 'dim';
-  if(/(fail|error|refus|reject|timeout|exception|invalid|denied|✗|❌|\b[45]\d\d\b)/.test(s))return 'err';
+  if(/\\b(?:fail\w*|error\w*|refus\w*|reject\w*|timeout|exception|invalid|denied)\\b|✗|❌|\\b[45]\d\d\\b/.test(s))return 'err';
   if(/(skip|not met|not_met|excluded|exclude|held|blocked|pending|queued|searching|missing|unmatched)/.test(s))return 'warn';
   if(/(done|ok|success|inserted|upserted|pushed|written|verified|created|updated|added|appended|found|matched|sent|complete|synced|✓|^yes$|^true$)/.test(s))return 'ok';
   return '';
@@ -807,13 +833,7 @@ function relAge(ts){
   const h=Math.floor(m/60); return h+'h '+(m%60)+'m ago';
 }
 function isAttentionRecord(r){
-  if(r.error)return true;
-  const status=String(r.status??r.outcome??r.result??'');
-  if(ATTENTION_RE.test(status))return true;
-  for(const v of Object.values(r)){
-    if(typeof v==='string'&&ATTENTION_RE.test(v))return true;
-  }
-  return false;
+  return r.error!==undefined&&r.error!==null&&String(r.error).trim()!=='';
 }
 function recordGroups(events){
   // Ledger mechanics belong in Timeline/Run info, not as repeated data columns.
@@ -837,25 +857,145 @@ function recordGroups(events){
   }
   return {groups,gorder};
 }
+function filterKind(rows,column){
+  const values=rows.map(r=>r[column]).filter(v=>v!==undefined&&v!==null&&v!=='');
+  if(values.length&&values.every(v=>v===true||v===false||String(v).toLowerCase()==='true'||String(v).toLowerCase()==='false'))return 'boolean';
+  if(values.length&&values.every(v=>Number.isFinite(Number(v))))return 'number';
+  const distinct=new Set(values.map(v=>String(fmt(v))));
+  return distinct.size<=12?'category':'text';
+}
+function filterOperators(kind){
+  if(kind==='boolean')return [['true','is true'],['false','is false']];
+  if(kind==='number')return [['eq','equal to'],['gt','greater than'],['lt','less than'],['gte','greater than or equal to'],['lte','less than or equal to'],['empty','is empty'],['not_empty','is not empty'],['between','between']];
+  if(kind==='category')return [['contains','contains'],['not_contains','does not contain'],['empty','is empty'],['not_empty','is not empty'],['eq','equal to'],['neq','not equal to']];
+  return [['contains','contains'],['not_contains','does not contain'],['empty','is empty'],['not_empty','is not empty'],['eq','equal to'],['neq','not equal to']];
+}
+function rowsMatchFilters(rows, table){
+  const state=tableFilters[table];
+  if(!state||(!state.and.length&&!state.groups.length))return rows;
+  const matches=(row,filter)=>{
+    const raw=row[filter.column], empty=raw===undefined||raw===null||raw==='';
+    if(filter.kind==='boolean'){
+      const value=raw===true||String(raw).toLowerCase()==='true';
+      return filter.op==='true'?value:!value;
+    }
+    if(filter.op==='empty')return empty;
+    if(filter.op==='not_empty')return !empty;
+    if(empty)return false;
+    if(filter.kind==='number'){
+      const value=Number(raw), first=Number(filter.value), second=Number(filter.value2);
+      if(!Number.isFinite(value))return false;
+      if(filter.op==='eq')return value===first;
+      if(filter.op==='gt')return value>first;
+      if(filter.op==='gte')return value>=first;
+      if(filter.op==='lt')return value<first;
+      if(filter.op==='lte')return value<=first;
+      return value>=Math.min(first,second)&&value<=Math.max(first,second);
+    }
+    const value=String(fmt(raw)).toLowerCase(), expected=String(filter.value??'').toLowerCase();
+    if(filter.op==='contains')return value.includes(expected);
+    if(filter.op==='not_contains')return !value.includes(expected);
+    if(filter.op==='eq')return value===expected;
+    return value!==expected;
+  };
+  return rows.filter(row=>state.and.every(filter=>matches(row,filter))&&
+    state.groups.every(group=>group.filters.some(filter=>matches(row,filter))));
+}
+function toggleFilters(table, cols){
+  if(filterOpen===table){filterOpen=null;filterDraft=null;}
+  else {filterOpen=table;filterDraft={table,column:cols[0]||'',op:'contains',value:'',value2:'',target:'and'};}
+  _filterVersion++;render();
+}
+function setFilterDraft(field, value){
+  if(!filterDraft)return;
+  filterDraft={...filterDraft,[field]:value};
+  if(field==='column'){
+    const kind=filterDraft.kindFor?.[value]||'text';
+    filterDraft.op=filterOperators(kind)[0][0];filterDraft.value='';filterDraft.value2='';
+  }
+  _filterVersion++;render();
+}
+function setFilterDraftValue(field, value){
+  if(filterDraft)filterDraft={...filterDraft,[field]:value};
+}
+function applyFilter(table, kinds){
+  if(!filterDraft?.column)return;
+  const kind=kinds[filterDraft.column]||'text';
+  const op=filterDraft.op;
+  if(kind!=='boolean'&&!['empty','not_empty'].includes(op)&&String(filterDraft.value??'')==='')return;
+  if(op==='between'&&String(filterDraft.value2??'')==='')return;
+  const state=tableFilters[table]||{and:[],groups:[]};
+  const filter={id:`f${Date.now().toString(36)}`,column:filterDraft.column,op,kind,value:filterDraft.value,value2:filterDraft.value2};
+  if(filterDraft.target==='and')state.and.push(filter);
+  else if(filterDraft.target==='new_group')state.groups.push({id:`g${Date.now().toString(36)}`,filters:[filter]});
+  else {
+    const group=state.groups.find(g=>`group:${g.id}`===filterDraft.target);
+    if(group)group.filters.push(filter);
+    else state.and.push(filter);
+  }
+  tableFilters[table]=state;
+  filterOpen=null;filterDraft=null;_filterVersion++;render();
+}
+function removeFilter(table, target, filterId){
+  const state=tableFilters[table];if(!state)return;
+  if(target==='and')state.and=state.and.filter(filter=>filter.id!==filterId);
+  else {
+    const group=state.groups.find(g=>`group:${g.id}`===target);
+    if(group)group.filters=group.filters.filter(filter=>filter.id!==filterId);
+    state.groups=state.groups.filter(group=>group.filters.length);
+  }
+  _filterVersion++;render();
+}
+function filterControls(table, cols, rows){
+  const state=tableFilters[table]||{and:[],groups:[]};
+  const kinds=Object.fromEntries(cols.map(c=>[c,filterKind(rows,c)]));
+  const chip=(f,target)=>{
+    const label=['empty','not_empty','true','false'].includes(f.op)?filterOperators(f.kind).find(x=>x[0]===f.op)?.[1]:`${filterOperators(f.kind).find(x=>x[0]===f.op)?.[1]||f.op} ${f.value}${f.op==='between'?` and ${f.value2}`:''}`;
+    return `<span class=filterChip>${esc(f.column)} ${esc(label)}<button title="Remove filter" aria-label="Remove ${esc(f.column)} filter" onclick="removeFilter(${esc(JSON.stringify(table))},${esc(JSON.stringify(target))},${esc(JSON.stringify(f.id))})">×</button></span>`;
+  };
+  const andChips=state.and.map(f=>chip(f,'and')).join('');
+  const groupChips=state.groups.map((group,index)=>`<span class=filterGroup><small>OR group ${index+1}</small>${group.filters.map(f=>chip(f,`group:${group.id}`)).join('<span class=filterJoin>OR</span>')}</span>`).join('');
+  const toggle=`<button class=filterToggle onclick="toggleFilters(${esc(JSON.stringify(table))},${esc(JSON.stringify(cols))})">Filter columns</button>`;
+  if(filterOpen!==table)return `<div class=tableTools>${toggle}${andChips}${groupChips}</div>`;
+  if(!filterDraft||filterDraft.table!==table)filterDraft={table,column:cols[0]||'',op:'contains',value:'',value2:'',target:'and',kindFor:kinds};
+  filterDraft.kindFor=kinds;
+  const kind=kinds[filterDraft.column]||'text';
+  const ops=filterOperators(kind);
+  const noValue=['empty','not_empty'].includes(filterDraft.op)||kind==='boolean';
+  const values=[...new Set(rows.map(r=>r[filterDraft.column]).filter(v=>v!==undefined&&v!==null&&v!=='').map(v=>String(fmt(v))))].sort();
+  const valueField=kind==='boolean'
+    ?'<span></span>'
+    :kind==='category'
+    ?`<select onchange="setFilterDraft('value',this.value)" ${noValue?'disabled':''}><option value="">Choose value</option>${values.map(v=>`<option value="${esc(v)}" ${v===filterDraft.value?'selected':''}>${esc(v)}</option>`).join('')}</select>`
+    :`<input type="${kind==='number'?'number':'text'}" value="${esc(filterDraft.value)}" ${noValue?'disabled':''} placeholder="Value" oninput="setFilterDraftValue('value',this.value)">`;
+  const second=kind==='number'&&filterDraft.op==='between'
+    ?`<input type="number" value="${esc(filterDraft.value2)}" placeholder="And value" oninput="setFilterDraftValue('value2',this.value)">`
+    :'<span></span>';
+  const targets=[['and','All filters (AND)'],['new_group','New OR group'],...state.groups.map((group,index)=>[`group:${group.id}`,`OR group ${index+1}`])];
+  return `<div class=tableTools>${toggle}${andChips}${groupChips}</div><div class=filterPanel><select onchange="setFilterDraft('column',this.value)">${cols.map(c=>`<option value="${esc(c)}" ${c===filterDraft.column?'selected':''}>${esc(c)}</option>`).join('')}</select><select onchange="setFilterDraft('op',this.value)">${ops.map(([value,label])=>`<option value="${value}" ${value===filterDraft.op?'selected':''}>${label}</option>`).join('')}</select>${valueField}${second}<select onchange="setFilterDraft('target',this.value)">${targets.map(([value,label])=>`<option value="${esc(value)}" ${value===filterDraft.target?'selected':''}>${esc(label)}</option>`).join('')}</select><button class=filterAction onclick="applyFilter(${esc(JSON.stringify(table))},${esc(JSON.stringify(kinds))})">Add filter</button></div>`;
+}
 function renderRecordTable(groups, gorder, label){
   if(!gorder.length)return null;
   if(!gorder.includes(recTab))recTab=gorder[0];
   const g=groups[recTab];
-  const rowKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
-  const visibleRows=rowKeys.map(k=>g.rows[k]);
-  if(view==='attention'&&!rowKeys.length)return '<div class=empty>No records need attention right now.</div>';
+  const baseKeys=view==='attention' ? g.order.filter(k=>isAttentionRecord(g.rows[k])) : g.order;
+  const allRows=baseKeys.map(k=>g.rows[k]);
+  if(view==='attention'&&!baseKeys.length)return '<div class=empty>No records need attention right now.</div>';
   const always=new Set(['company','name','status','source_status','linkedin_status','contact_status','error']);
   let cols=g.cols.filter(c=>{
-    const filled=visibleRows.filter(r=>r[c]!==undefined&&r[c]!==null&&r[c]!=='').length;
+    const filled=allRows.filter(r=>r[c]!==undefined&&r[c]!==null&&r[c]!=='').length;
     if(!filled)return false;
-    return always.has(c)||filled>=Math.max(1, Math.ceil(visibleRows.length*.02));
+    return always.has(c)||filled>=Math.max(1, Math.ceil(allRows.length*.02));
   });
   if(cols.includes('company')&&cols.includes('name')){
-    const same=visibleRows.filter(r=>String(r.company??'')===String(r.name??'')).length;
-    if(same>=visibleRows.length*.95)cols=cols.filter(c=>c!=='name');
+    const same=allRows.filter(r=>String(r.company??'')===String(r.name??'')).length;
+    if(same>=allRows.length*.95)cols=cols.filter(c=>c!=='name');
   }
   if(!cols.length)return '<div class=empty>No populated columns for these rows yet.</div>';
-  const cats=catColumns(g.order.map(k=>g.rows[k]), cols);
+  const filteredKeys=baseKeys.filter(k=>rowsMatchFilters([g.rows[k]],recTab).length);
+  const rowKeys=filteredKeys;
+  const visibleRows=rowKeys.map(k=>g.rows[k]);
+  const cats=catColumns(allRows, cols);
   const gcell=(c,v,row)=>{
     const disp=esc(fmt(v));
     const previous=row.__prev?.[c];
@@ -876,6 +1016,7 @@ function renderRecordTable(groups, gorder, label){
   const subtabs=hasSubtabs
     ? `<div class=subtabs>`+gorder.map(t=>`<span class="subtab ${t===recTab?'sel':''}" onclick="setRecTab(${esc(JSON.stringify(t))})">${esc(t)} <small>· ${groups[t].order.length}</small></span>`).join('')+'</div>'
     : '';
+  const tools=filterControls(recTab,cols,allRows);
   const ordinals=Object.create(null); g.order.forEach((key,index)=>{ordinals[key]=index+1;});
   const rrow=(k)=>{const r=g.rows[k], ordinal=ordinals[k];
     return `<tr data-key="${esc(recTab+'::'+k)}" data-co="${esc(k)}" data-name="${esc(k)}">`+
@@ -885,11 +1026,11 @@ function renderRecordTable(groups, gorder, label){
   const thead=`<thead><tr><th class=rownum style="width:${ROW_NUMBER_W}px">#</th>${cols.map((c,i)=>`<th class="${i===0?'datafirst':''}" data-col="${esc(recTab+'::'+c)}" style="width:${gbase[c]}px">${esc(c)}<span class=rz></span></th>`).join('')}</tr></thead>`;
   // small tables (≤500 rows): build in one shot
   if(rowKeys.length<=500)
-    return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}" style="height:${contentViewportHeight()}px">${subtabs}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody>${rowKeys.map(rrow).join('')}</tbody></table></div></div>`;
+    return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}${filterOpen===recTab?' filtersOpen':''}" style="height:${contentViewportHeight()}px">${subtabs}${tools}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody>${rowKeys.map(rrow).join('')}</tbody></table></div></div>`;
   // large tables: write shell + thead immediately, stream tbody rows via setTimeout
   _buildAbort && _buildAbort();
   const shell=document.createElement('div');
-  shell.innerHTML=`${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}" style="height:${contentViewportHeight()}px">${subtabs}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody></tbody></table></div></div>`;
+  shell.innerHTML=`${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}${filterOpen===recTab?' filtersOpen':''}" style="height:${contentViewportHeight()}px">${subtabs}${tools}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody></tbody></table></div></div>`;
   content.replaceChildren(shell);
   const tbody=shell.querySelector('.tablewrap tbody');
   let aborted=false;
@@ -1067,8 +1208,9 @@ function attemptBanner(){
 
 function render(){
   // skip full re-render when no new events and same view — avoids rebuilding 15k-row table every 2s
-  if(all.length===_eventCount&&view===_lastView&&sel===_lastSel&&recTab===_lastRecTab)return;
-  _eventCount=all.length;_lastView=view;_lastSel=sel;_lastRecTab=recTab;
+  if(all.length===_eventCount&&view===_lastView&&sel===_lastSel&&recTab===_lastRecTab&&_filterVersion===_lastFilterVersion)return;
+  const tableScroll=(view==='records'||view==='attention')?captureTableScroll():null;
+  _eventCount=all.length;_lastView=view;_lastSel=sel;_lastRecTab=recTab;_lastFilterVersion=_filterVersion;
   for(const [v,id] of Object.entries({records:'tabRecords',attention:'tabAttention',feed:'tabFeed',info:'tabInfo',explain:'tabExplain'}))
     document.getElementById(id).classList.toggle('sel',view===v);
   const tech=document.getElementById('tech').checked;
@@ -1116,7 +1258,7 @@ function render(){
   if(!hs.length){content.innerHTML='<div class=empty>No events yet — they appear here within ~2s of happening.</div>';return}
   if(view==='feed'||(view==='attention'&&!attemptEvents().some(e=>(e.event||e.action)==='record'))){
     const shown=view==='attention'
-      ? hs.filter(({e,h})=>h.cls==='err'||ATTENTION_RE.test(JSON.stringify(e)))
+      ? hs.filter(({e})=>e.error!==undefined&&e.error!==null&&String(e.error).trim()!=='')
       : hs;
     if(!shown.length){content.innerHTML='<div class=empty>No attention items yet.</div>';return}
     content.innerHTML=attemptBanner()+shown.map(({e,h})=>`<div class=line><span class=when>${(e.ts||'').slice(11,19)}</span><span>${h.icon}</span><span class=${h.cls}>${h.text}${h.detail?`<br><small style="color:var(--dim)">${esc(h.detail)}</small>`:''}</span></div>`).join('');
@@ -1136,6 +1278,7 @@ function render(){
     const html=renderRecordTable(groups,gorder,'');
     if(html!==null)content.innerHTML=html;
     decorateChat();
+    restoreTableScroll(tableScroll);
     return;
   }
   const progEvents=progressEvents();
@@ -1251,7 +1394,7 @@ function renderStats(){
       const st=String(row.status||'').toLowerCase();
       if(st==='running'||st==='queued'||st==='pending')statusCounts.running++;
       else if(st==='done'||st==='success'||st==='ok'||st==='complete')statusCounts.done++;
-      else if(ATTENTION_RE.test(st)||row.error)statusCounts.failed++;
+      else if(isAttentionRecord(row))statusCounts.failed++;
       if(isAttentionRecord(row))statusCounts.attention++;
     }
     if(statusCounts.running)chips.push(['running',statusCounts.running,'warn']);

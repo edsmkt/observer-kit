@@ -137,7 +137,8 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     ok("run list keeps older history accessible", len(history) >= 47,
        f"visible={len(history)}")
 
-    ok("single-table headers do not reserve missing subtabs", '.recordshell.hasSubtabs th{top:43px}' in dashboard.PAGE)
+    ok("record headers remain below the table controls and only reserve subtabs when present",
+       '.recordshell th{top:41px}' in dashboard.PAGE and '.recordshell.hasSubtabs th{top:84px}' in dashboard.PAGE)
     ok("table tabs stay visible during horizontal inspection", '.subtabs{position:sticky;top:0;left:0;' in dashboard.PAGE)
     ok("record tables use explicit head and body sections", '<thead><tr>' in dashboard.PAGE and '<tbody>' in dashboard.PAGE)
     ok("record maps safely accept special table and key names", 'Object.create(null)' in dashboard.PAGE and 'function hasOwn(obj,key)' in dashboard.PAGE)
@@ -177,6 +178,23 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
        'const previous=row.__prev?.[c];' in dashboard.PAGE and 'was ${esc(fmt(previous))}' in dashboard.PAGE)
     ok("completed runs surface reported credit spend without custom dashboard wiring",
        "'sheet_rows_appended','credits_spent','errors'" in dashboard.PAGE)
+    ok("live data updates preserve the operator's table position",
+       'function captureTableScroll()' in dashboard.PAGE and 'function restoreTableScroll(state)' in dashboard.PAGE and
+       'restoreTableScroll(tableScroll);' in dashboard.PAGE)
+    ok("record tables provide typed multi-column filters",
+       "function filterKind(rows,column)" in dashboard.PAGE and 'function rowsMatchFilters(rows, table)' in dashboard.PAGE and
+       'does not contain' in dashboard.PAGE and 'greater than or equal to' in dashboard.PAGE and
+       'between' in dashboard.PAGE and 'Filter columns' in dashboard.PAGE)
+    ok("column filters support AND clauses with nested OR groups",
+       'state.and.every(filter=>matches(row,filter))' in dashboard.PAGE and
+       'state.groups.every(group=>group.filters.some(filter=>matches(row,filter)))' in dashboard.PAGE and
+       'New OR group' in dashboard.PAGE and 'All filters (AND)' in dashboard.PAGE)
+    ok("boolean columns expose only true and false operators",
+       "return 'boolean'" in dashboard.PAGE and "[['true','is true'],['false','is false']]" in dashboard.PAGE and
+       "kind==='boolean'" in dashboard.PAGE)
+    ok("attention is an explicit record error contract, not a keyword heuristic",
+       "function isAttentionRecord(r){" in dashboard.PAGE and "String(r.error).trim()!==''" in dashboard.PAGE and
+       'ATTENTION_RE' not in dashboard.PAGE)
 
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

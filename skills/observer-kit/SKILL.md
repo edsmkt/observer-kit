@@ -81,6 +81,10 @@ harness on those exact paths so the dashboard reflects real work.
 5. Keep the script's durable checkpoint/resume logic authoritative. Re-runs use
    the same stable keys to update rows in place; failed items use the dead-letter
    list rather than redoing proven-complete work.
+   For a row that needs human attention, write a concise error field on that
+   same record. Leave the error field absent when the row is healthy; the
+   dashboard's Attention view is driven by this field. A successful retry emits
+   the updated row without an error field, which clears it from the visible row.
 6. Before any full run, run the emit linter, execute a dry-run sample, inspect
    the live dashboard against the JSONL, and wait for explicit approval.
 
