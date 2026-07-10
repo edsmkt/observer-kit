@@ -62,6 +62,8 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     ok("chunked read keeps full JSONL records", seen == ['old', 'big', 'small'], str(seen))
     ok("chunked read advances beyond the large record", list(offsets.values())[0] > 80)
     ok("chunked reads eventually reach end", list(offsets.values())[0] == os.path.getsize(ledger))
+    ok("reader reports whether a client should fetch the next chunk immediately",
+       not dashboard.has_more_events('runguard:large-run.jsonl', offsets))
 
     runs = dashboard.list_runs()
     desc = next((r.get('desc') for r in runs if r.get('label') == 'large-run.jsonl'), '')
@@ -195,6 +197,9 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     ok("attention is an explicit record error contract, not a keyword heuristic",
        "function isAttentionRecord(r){" in dashboard.PAGE and "String(r.error).trim()!==''" in dashboard.PAGE and
        'ATTENTION_RE' not in dashboard.PAGE)
+    ok("large fresh ledgers catch up without a two-second pause between chunks",
+       "'more': has_more_events(run_id, new_offsets)" in open(RUN_DASHBOARD, encoding='utf-8').read() and
+       'setTimeout(poll,more?0:2000);' in dashboard.PAGE)
 
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

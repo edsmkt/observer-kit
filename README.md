@@ -189,8 +189,10 @@ except Exception as exc:
     raise
 ```
 
-The important part is simple: emit each row while the real work happens. The
-dashboard then stays live, and a restart can continue from durable progress.
+The important part is simple: keep two guarantees separate. Emit each row while
+the real work happens so the dashboard stays live, and save the actual result to
+a re-readable destination before moving on so a restart can continue from
+durable progress.
 
 ## For Builders
 

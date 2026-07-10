@@ -1,489 +1,439 @@
-# Run Observer Kit — locks, ledgers, and a live dashboard for batch scripts
+# Observer Kit Production Pattern
 
-A three-piece pattern for any project where scripts spend money (API credits) or
-mutate shared state (CRM, database). Give this folder to a project agent and say
-"replicate this" — everything is stdlib-only Python, no dependencies.
+This file is the detailed implementation reference for agent-run data movement.
+Use `SKILL.md` for the ordered procedure and completion gates. Use this file for
+the runtime contracts, APIs, and examples that implement those steps.
 
 ## Contents
 
-- The three pieces
-- Why it exists
-- The boring default contract
-- Adapting an existing script
-- Required sample gate
-- Event vocabulary
-- Parallel datasets and shared-API throttling
-- Input/output sources
-- How to adapt to a new project
-- Scaling path
-- Files
+- System boundaries
+- Source identity and run lanes
+- Minimal wrapper
+- Operator view and record identity
+- Durable boundaries and resume
+- External delivery
+- Live loops, batches, and pools
+- Controls, chat, and watchers
+- Failure and recovery
+- Parallel sources, throttling, and ceilings
+- Dashboard event contract
+- Production verification
+- Runtime files and APIs
 
-## The three pieces
+## System Boundaries
 
-1. **`runguard.py`** — exclusivity + audit trail
-   - `acquire_lock(scope)` — a persistent OS advisory lock per scope. A second
-     process on the same scope refuses to start (SystemExit) while the first
-     holds it. Re-entrant within one process. The OS releases a crashed
-     process's lock, so crash recovery is "just re-run" with no manual cleanup.
-   - `ledger(scope, event, **fields)` — appends one JSON line to a per-run
-     ledger file. This is the local audit trail AND the dashboard's data feed.
-   - `start_observed_run(name, ...)` — the boring default wrapper for new
-     scripts: lock, run id, dry-run flag, generic step records, counters,
-     checkpoints, and `success()` / `fail()` lifecycle closure.
+Observer Kit is a local workflow harness with five pieces:
 
-2. **`run_dashboard.py`** — a localhost website (default :8484), a SAMPLE that
-   tails the ledger files live. Read-only, zero-intrusion. It shows an
-   at-a-glance activity strip, status chips, an Attention view for failures and
-   refusals, and four core tabs:
-   - **Per company** — one row per (entity, item): status pills flip from
-     "searching…" to the found value in real time.
-   - **Timeline** — plain-English event feed; raw API calls behind a toggle.
-   - **Run info** — this run's identity + run-level progress (rounds, credits,
-     start/finish), kept off the table so a huge run leaves them easy to find.
-   - **How it works** — renders `EXPLAIN.md`: a plain-English + ASCII statement
-     of intent the operator reads to verify the run before it spends.
+1. **The agent skill** carries the operational judgment: map the real workflow,
+   design the operator view, run a sample, inspect evidence, and request approval.
+2. **The CLI** repeats setup and transport: `init`, `dashboard`, `run`, `watch`,
+   `reply`, `doctor`, and `test`.
+3. **`runguard.py`** gives scripts source locks, append-only events, counters,
+   checkpoints, validation, policy gates, write intents and receipts, controls,
+   dead letters, simulation, and shared throttling.
+4. **`run_dashboard.py`** tails a state directory and renders every JSONL lane.
+   It also records operator chat and control requests.
+5. **`watch_chat.py`** carries dashboard messages into the active agent harness.
 
-   Table interactions: wide schemas scroll left/right with the **first column
-   frozen**; **drag a header's right edge** to resize a column (persists per
-   browser); cells stay a uniform single-line height (long text truncates with
-   an ellipsis), and **double-click a cell** to read its full content in a popup.
+The agent session remains the brain. The watcher supplies input, and the script
+acknowledges controls at its own durable boundaries.
 
-3. **`example_worker.py`** — a minimal worker script showing the full pattern:
-   lock, plan, spend ceiling, per-round processing, ledger events, release.
+## Source Identity And Run Lanes
 
-## Why it exists
+Pass the real input identity as `source=`. Good identities remain stable across
+retries and distinguish genuinely separate datasets:
 
-Bulk writes go wrong when a second process starts while the first is still
-running — nobody realizes — and the cleanup attempt makes it worse. The fix is
-structural, not procedural:
+- a resolved CSV, JSONL, workbook, or export path;
+- a Google Sheet ID plus worksheet identity;
+- a database table plus stable query or snapshot ID;
+- an API export ID, object collection, or remote dataset version.
 
-- **Treat a lock refusal as the guard working.** When you see
-  "REFUSING TO START", stop the named PID deliberately or wait for it to finish.
-  Start a parallel run only after the first has exited.
-- **Write results to the durable store as they land**, with no cleanup step. A
-  re-run then recomputes only what is still missing, so a crash costs nothing and
-  resume is always safe.
-- **Put a hard spend ceiling in the code**, defaulting to the computed
-  worst-case need of the plan — a loop bug then cannot overspend even in theory.
-- **Submit no more work for one entity than its remaining need.** When the
-  provider charges per result, keep in-flight ≤ need so worst-case spend = cap.
+`start_observed_run(name, source=...)` derives the lock scope from the workflow
+name and source identity. Two processes using the same identity contend on one
+lock. Disjoint source identities can run concurrently.
 
-## The boring default contract
-
-For new scripts, start here. This is the "small wrapper, not an operational
-religion" path:
+Capture reviewed input state with `input_snapshot()`:
 
 ```python
-from runguard import start_observed_run
+from runguard import input_snapshot, start_observed_run
+
+snapshot = input_snapshot(args.input)
+run = start_observed_run(
+    'transform-records',
+    source=args.input,
+    input_snapshot=snapshot,
+    destination='warehouse',
+    transform_version='v3',
+    script=__file__,
+    dry_run=args.dry_run,
+)
+```
+
+File sources receive a content hash automatically. Remote sources gain a useful
+fingerprint when `records=` or `version=` accompanies their identity. A changed
+fingerprint in the same lane emits `input_changed` for operator review.
+
+Choose lanes by intent:
+
+- **Retry, script fix, or additional enrichment of existing rows**: reuse the
+  source, session, table, and stable keys. New record events update those rows.
+- **Clean comparison, redo, or separate batch**: set a new stable
+  `RUNGUARD_SESSION`, pass `--session <name>`, or use `--session auto`.
+
+## Minimal Wrapper
+
+Use `start_observed_run()` for new scripts and adapted scripts that fit the
+standard lifecycle:
+
+```python
+from runguard import RunPaused, start_observed_run
 
 run = start_observed_run(
-    'enrich-leads',
-    source=args.input,  # actual CSV path, sheet ID, table ID, or export ID
+    'normalize-catalog',
+    source=args.input,
     dry_run=args.dry_run,
-    description='Enrich July HubSpot leads and fill missing firmographics',
-    todo=len(leads),
+    description='Normalize catalog records and append accepted rows',
+    todo=len(records),
+    progress_table='records',
+    summary_metrics=[
+        {'key': 'processed', 'label': 'processed'},
+        {'key': 'accepted', 'label': 'accepted'},
+        {'key': 'written', 'label': 'written'},
+    ],
 )
 
 try:
-    for lead in leads:
-        with run.step('enrich_lead', table='companies', key=lead.id,
-                      company=lead.domain):
-            enriched = enrich_lead(lead)
-
-            if not run.dry_run:
-                update_crm_lead(lead.id, enriched)
-
-            run.count('leads_enriched')
-            run.checkpoint('last_lead', lead.id)
-
-    run.success(processed=len(leads))
-except Exception as exc:
-    run.fail(exc)
-    raise
-```
-
-That one helper enforces the minimum run shape:
-
-- a lock is acquired before the first spend/write;
-- the run has a dashboard id (`run.run_id`) and a JSONL ledger;
-- `dry_run` is logged and available as `run.dry_run`;
-- every `run.step(...)` writes a visible `record` row (`running` → `done` or
-  `failed`);
-- counters and checkpoints are carried into the final event;
-- `success()` / `fail()` closes the lifecycle and releases the lock; a process
-  that exits before either writes an explicit `run_abandoned` failure event.
-
-Use the lower-level `acquire_lock()` + `ledger()` primitives when a script needs
-custom event vocabulary, but keep this shape unless there is a real reason not
-to. If adding Observer Kit to a new risky script takes more than a few minutes,
-the wrapper is too big.
-
-## Adapting an existing script
-
-Do not rebuild a working pipeline around Observer Kit. Read it first and place
-the wrapper around its real inputs, actual work loops, provider calls, durable
-resume state, and sink mutations.
-
-1. Identify the immutable source identity (input path, Sheet/export ID, table
-   plus query identity), source entity key, every sink, and every loop/pool
-   where work actually completes. Use those for `source=`, `table=`, and `key=`.
-2. Preserve established CLI behavior. Add a representative `--dry-run` sample,
-   a `--limit`/sample-size, and an intentional `--full-run` gate when the script
-   spends, scrapes broadly, sends, or mutates shared data.
-3. Start `start_observed_run()` once around the real job. Move any final buffered
-   record flush into the existing item loop or `as_completed` callback so JSONL
-   reflects the work as it lands. Keep the script's actual cache/checkpoint as
-   the resume authority; log it with `run.checkpoint()`.
-4. For every destination write, use `write_intent` before the real call and
-   `write_receipt` only after confirmation. Give the receipt `record_table=`,
-   `outcome=`, and `outcome_field=` so the source entity's sink cell changes in
-   place. The separate `writes` table remains the immutable audit surface.
-5. Run `references/lint_emit.py`, exercise a dry-run sample, and compare the
-   dashboard to the actual JSONL and durable destination state before approval.
-
-Never replace real work with simulated dashboard rows, invent progress from a
-cache that has not been emitted, rename an input to bypass a lock, or use a new
-key to evade an uncertain write. If a script lacks a safe point for incremental
-emits or resumable source identity, patch that first and explain why.
-
-## Record transformation and delivery
-
-For a workflow that pulls records from one system, transforms them, and pushes
-them somewhere else, add an observed delivery boundary around the sink. This is
-optional for a read-only scraper, but is the default for CRM, spreadsheet,
-database, webhook, and file writes.
-
-```python
-from runguard import PendingWrite, RunPaused, input_snapshot, start_observed_run
-
-snapshot = input_snapshot(args.input)  # path, or remote ID + records/version
-run = start_observed_run(
-    'sync-accounts', source=args.input, input_snapshot=snapshot,
-    destination='hubspot', transform_version='v3', script=__file__,
-    dry_run=args.dry_run, todo=len(rows), progress_table='accounts')
-
-try:
-    run.preview(sample_changes, estimates={'writes': len(rows), 'credits': 0})
-    for row in rows:
+    for record in records:
         run.check_controls()
-        output = transform(row)
-        run.validate(output, row['id'], CONTRACT)  # pauses on unknown schema by default
-        if not run.allow_write(output, row['id'], POLICY, current=row, destination='hubspot'):
-            continue
-        ticket = run.write_intent(row['id'], 'hubspot', payload=output)
-        if ticket is None or run.dry_run:  # already delivered, or preview only
-            continue
-        result = upsert_hubspot(output, idempotency_key=ticket['operation_key'])
-        run.write_receipt(ticket, result['id'], verified=True,
-                          record_table='accounts', outcome='updated',
-                          outcome_field='hubspot',
-                          lineage={'source_url': row['source_url'], 'provider': 'clearbit'})
+        with run.step('normalize', table='records', key=record['id'],
+                      source_value=record['value']):
+            output = normalize(record)
+            persist_checkpoint(record['id'], output)
+            run.count('processed')
+            run.checkpoint('last_record', record['id'])
         run.check_controls(after_record=True)
-    run.reconcile()
     run.success()
 except RunPaused:
     raise
-except PendingWrite:
-    # A request may have landed before the prior process crashed. Inspect the
-    # destination and append its receipt; never create a new key to bypass this.
-    raise
 except Exception as exc:
     run.fail(exc)
     raise
 ```
 
-The delivery vocabulary deliberately stays generic:
+`run.step()` writes the same row as `running`, then `done` or `failed`. A failed
+step includes `error` and creates a replayable dead letter. `run.success()` and
+`run.fail()` write terminal events and release the source lock. Process exit
+before either closure writes `run_abandoned`.
 
-- `input_snapshot(source, records=None, version=None)` fingerprints the reviewed
-  input without copying it into the ledger. A changed fingerprint in the same
-  lane produces `input_changed` before a resumed attempt.
-- `run.preview(samples, estimates=...)` logs a compact impact preview. Include
-  before/after/action and estimates for spend, writes, deletes, and skips.
-- `run.validate(record, key, contract)` accepts `required`, `types`, `allowed`,
-  and `unique`. `run.allow_write(...)` accepts `allowed_destinations`,
-  `required_true`, `forbidden_true`, `forbidden_fields`, `protected_fields`, and
-  an optional small project `check(record, current)` callback.
-- `run.write_intent(...)` uses a stable operation key built from record key,
-  destination, and transform revision. `run.write_receipt(...)` is the durable
-  confirmation. Give the receipt `record_table=` and an `outcome=` to update the
-  same dashboard entity row in place; its destination name is the default column
-  or `outcome_field=` can name a clearer one. A pending intent raises
-  `PendingWrite` instead of double-writing.
-- A failed `run.step(...)` is added to the dead-letter list automatically;
-  `run.dead_letter(...)` also records explicit recoverable failures with only the
-  key, error, retry number, and optional payload reference.
-  `run.replay_candidates()` returns unresolved keys after a fix. `run.lineage(...)`
-  attaches provider/source/reasoning metadata.
-- `run.gate(...)` makes a batch-level minimum/maximum check visible and pauses on
-  failure by default. `run.simulate(fixture)` loads JSON or JSONL fixture data
-  and records its fingerprint.
+Use the lower-level `acquire_lock()` and `ledger()` functions when the script
+needs a custom lifecycle while preserving the same source, row, durability, and
+approval contracts.
 
-Dashboard control buttons write durable `controls.jsonl` requests and mirror a
-short note into `chat.jsonl`, which wakes the run-scoped watcher. Workers decide
-the safe checkpoint by calling `run.check_controls()`; they are never killed by
-the dashboard. The control kinds are `pause`, `stop_after_record`, and
-`approve_full_run`. Approval is a visible operator signal, not automatic action.
+## Operator View And Record Identity
 
-## Live observability contract
+The dashboard is generic. Design tables from the user's entities rather than
+from Observer Kit's examples.
 
-The dashboard tails the ledger; it cannot show progress the script has not
-written. A risky workflow is not correctly observed if it spends, scrapes,
-fills a cache, waits on a provider batch, or mutates records for minutes and
-only emits dashboard rows at the final write pass.
-
-Put ledger writes in the same loops that do the risky work:
+Every business row uses:
 
 ```python
-for company in companies:
-    with run.step('resolve_linkedin', table='companies', key=company['domain'],
-                  company=company['domain'], linkedin_status='running'):
-        result = resolve_linkedin(company)
-        save_cache(company, result)
-        run.count('linkedin_checked')
-        if result.url:
-            run.count('linkedin_resolved')
-        run.checkpoint('last_domain', company['domain'])
+ledger(scope, 'record', table='orders', key=order_id,
+       source='erp', amount=amount, qualification=reasoning,
+       warehouse='pending', error='')
 ```
 
-For provider batches, emit one event before and after each batch so the
-operator can tell "slow provider page" from "dead run":
+- `table` groups comparable entities.
+- `key` identifies one entity across retries and later enrichment.
+- arbitrary fields become columns.
+- the first meaningful identity field becomes the frozen inspection column.
+- a non-empty `error` field places the current row in Attention.
+- a later event with the same `table` and `key` updates the row in place and
+  retains fields supplied by earlier events.
+
+`run.step(name, **fields)` reserves `name` for the step label. Use `label` or
+`entity_name` for a business name during the step, then emit the operator-facing
+`name` field in the completed record or receipt update.
+
+Represent source processing and destination delivery as separate fields. For
+example, `status='transformed'` describes local work and
+`warehouse='appended'` describes the confirmed sink outcome. Emit the confirmed
+outcome on the same business row so `pending` changes to `appended`, `updated`,
+`inserted`, `skipped`, or `failed` in one column.
+
+Choose three to five `summary_metrics` that answer the operator's main questions.
+Emit additional counters for audit value while keeping the headline strip
+compact.
+
+## Durable Boundaries And Resume
+
+A **durable boundary** is the point where completed work can be read after the
+process exits. Suitable boundaries include:
+
+- an appended JSONL checkpoint row;
+- a committed database transaction;
+- a confirmed Sheet or CRM update;
+- a cache file written atomically;
+- a provider result stored with its stable source key.
+
+Use this completion order for each item or bounded chunk:
+
+1. Perform the provider, transformation, or source work.
+2. Persist its authoritative result.
+3. Emit the dashboard record for the same stable key.
+4. Emit the checkpoint that resume will read.
+5. Begin the next spend or mutation.
+
+Resume starts by reading the durable store, derives the remaining work, and
+reuses the same lane and keys:
 
 ```python
-for batch_no, batch in enumerate(chunks(items, 50), start=1):
-    run.checkpoint('provider_batch', batch_no)
-    with run.step('provider_batch', table='batches', key=f'blitz:{batch_no}',
-                  provider='blitz', size=len(batch), status='running'):
-        response = call_provider(batch)
-        run.count('provider_batches')
-        run.count('provider_results', len(response.results))
+saved = read_checkpoint_rows(checkpoint_path)
+remaining = [row for row in source_rows if row['id'] not in saved]
+
+for row in remaining:
+    result = paid_provider(row)
+    append_checkpoint(row['id'], result)
+    ledger(scope, 'record', table='records', key=row['id'], **result)
+    run.checkpoint('last_record', row['id'])
 ```
 
-For thread pools, write progress as futures finish, not after all futures join:
+For a phase-batched pipeline, persist every finalized item as a phase completes.
+When an API returns authoritative batches, persist each bounded response before
+submitting the next batch. Progress events provide liveness; the saved result
+provides durability.
+
+Run `references/lint_emit.py` against every agent-written batch script. It checks
+for final record flushes and for result containers that advance while the script
+offers progress events in place of a durable sink. Treat its zero exit as one
+piece of evidence and confirm the real sink during the sample.
+
+## External Delivery
+
+Wrap every CRM, database, spreadsheet, file, webhook, or API mutation in an
+observed delivery boundary:
 
 ```python
-with ThreadPoolExecutor(max_workers=workers) as ex:
-    futures = {ex.submit(enrich_one, item): item for item in items}
+CONTRACT = {
+    'required': ['id', 'name'],
+    'types': {'id': 'string', 'name': 'string'},
+    'unique': ['id'],
+}
+POLICY = {
+    'allowed_destinations': ['warehouse'],
+    'protected_fields': ['created_at'],
+}
+
+for row in rows:
+    output = transform(row)
+    run.validate(output, row['id'], CONTRACT, table='records')
+    allowed = run.allow_write(
+        output, row['id'], POLICY, current=row, destination='warehouse')
+    if allowed:
+        ticket = run.write_intent(
+            row['id'], 'warehouse', payload=output,
+            record_table='records')
+        if run.dry_run:
+            continue
+        if ticket:
+            result = upsert_warehouse(
+                output, idempotency_key=ticket['operation_key'])
+            run.write_receipt(
+                ticket,
+                destination_id=result['id'],
+                verified=True,
+                record_table='records',
+                outcome_field='warehouse',
+                outcome='updated',
+                lineage={'source': 'input_export'},
+            )
+    run.check_controls(after_record=True)
+```
+
+`run.write_intent()` creates a stable operation key from the record key,
+destination, and transform version. Pass that key to destination idempotency
+support. `run.write_receipt()` records confirmed delivery and can update the
+business row's destination field. `run.reconcile()` summarizes intended,
+written, verified, pending, skipped, blocked, and dead-lettered operations.
+
+A prior intent with a confirmed receipt returns an idempotent skip. A prior
+intent awaiting a receipt raises `PendingWrite`, giving the agent a clear
+reconciliation task: inspect the destination, then record the matching receipt
+or retry according to destination evidence.
+
+Use `run.lineage()` or receipt `lineage=` for source URL, provider, reasoning,
+model, or transformation provenance. Keep sensitive payloads in their governed
+store and place hashes or `payload_ref` values in the ledger.
+
+## Live Loops, Batches, And Pools
+
+Emit from the place where work becomes authoritative.
+
+For a sequential loop, persist and emit per item:
+
+```python
+for row in rows:
+    with run.step('transform', table='records', key=row['id']):
+        output = transform(row)
+        append_checkpoint(row['id'], output)
+        run.count('processed')
+        run.checkpoint('last_record', row['id'])
+```
+
+For a thread or process pool, persist and emit as futures complete:
+
+```python
+with ThreadPoolExecutor(max_workers=workers) as pool:
+    futures = {pool.submit(enrich_one, row): row for row in rows}
     for future in as_completed(futures):
-        item = futures[future]
-        with run.step('enrich_one', table='companies', key=item.id,
-                      company=item.domain):
-            result = future.result()
-            persist(result)
-            run.count('processed')
-            run.checkpoint('last_item', item.id)
+        row = futures[future]
+        result = future.result()
+        append_checkpoint(row['id'], result)
+        ledger(scope, 'record', table='records', key=row['id'], **result)
+        run.count('processed')
+        run.checkpoint('last_record', row['id'])
 ```
 
-If stdout/stderr is redirected during a long run, keep it unbuffered
-(`python3 -u`, `PYTHONUNBUFFERED=1`, or `print(..., flush=True)`) so logs and
-dashboard timing agree. If the dashboard looks stale while cache files or logs
-change, patch the script to emit incremental ledger events before continuing
-the full run.
+For provider batches, emit a `batches` row or progress event before submission,
+persist the response after completion, then update that same batch row. Keep
+stdout and stderr unbuffered with `python3 -u`, `PYTHONUNBUFFERED=1`, or
+`flush=True` so logs and ledger timing agree.
 
-## Required sample gate
+## Controls, Chat, And Watchers
 
-For anything that spends credits, scrapes in bulk, sends messages, or mutates a
-shared system, run a small dry-run sample before any full run.
+The dashboard writes controls to `controls.jsonl` and operator messages to
+`chat.jsonl`. Both channels retain the run ID and relevant anchor.
 
-Default sequence:
+Call `run.check_controls()` before starting the next item and
+`run.check_controls(after_record=True)` after a durable item boundary:
 
-1. Build the workflow with `--dry-run`, `--limit`, and/or `--sample-size`.
-2. Run a representative sample first, usually 5-25 records.
-3. Review the dashboard for writes/skips/failures/spend/schema issues.
-4. Get explicit confirmation before the full dataset.
-5. Run the full job only through an intentional flag such as `--full-run`.
+- `pause` closes the attempt at the next check and emits `run_paused`.
+- `stop_after_record` waits for the next `after_record=True` check.
+- `approve_full_run` is returned to the script or harness as an operator signal.
 
-Silence is not approval. If the sample exposes problems, fix and re-sample.
+Each applied control emits `control_acknowledged`, so recovered processes retain
+one-shot control state.
 
-## Dashboard chat, watchers, and run lanes
-
-The dashboard writes operator notes to one shared `chat.jsonl`, tagged with the
-run id and anchor. Watchers are I/O bridges, not agents: they emit notes to the
-active harness session, and the harness decides what to inspect, patch, rerun,
-or reply.
-
-For a long-lived dashboard server, keep one all-run watcher attached to the
-harness:
+Use one long-lived dashboard and one all-run watcher for a project:
 
 ```bash
 observer-kit dashboard .runguard
 observer-kit watch .runguard --all --follow
 ```
 
-That watcher emits notes for any run in the state directory, including completed
-runs the operator opens later. For a temporary run-scoped bridge, use:
+`observer-kit run` also detects `OBSERVER_RUN_STARTED` and starts a run-scoped
+watcher. The watcher emits `OBSERVER_CHAT_EVENT` lines to the active harness.
+The harness inspects evidence, edits scripts, resumes work, and replies:
 
 ```bash
-observer-kit watch .runguard --run runguard:my-run.jsonl --follow
+observer-kit reply .runguard \
+  --run runguard:my-run.jsonl \
+  --anchor run \
+  --resolved \
+  --text "Updated the transform and resumed from the saved checkpoint."
 ```
 
-Reply into the same dashboard thread with:
+## Failure And Recovery
 
-```bash
-observer-kit reply .runguard --run runguard:my-run.jsonl --anchor <anchor> --text "Handled."
-```
+Close expected failures through `run.fail(exc)` and preserve the original
+exception. `run.step()` creates an error-bearing row and dead letter for item
+exceptions. Use `run.dead_letter()` directly for recoverable failures discovered
+outside a step.
 
-`observer-kit run` detects the `OBSERVER_RUN_STARTED` marker and starts a
-scoped watcher automatically unless `--watch none` is passed. That is useful for
-quick one-command runs. For serious monitoring, prefer a standalone dashboard
-plus `watch --all`.
+`run.replay_candidates()` returns unresolved record failures after a fix. Emit
+the repaired record with the same table and key; set `error=''` with the current
+healthy fields so Attention reflects the latest row.
 
-Run lanes:
+Recovery follows evidence:
 
-- Same source retry, fix, or dashboard-chat adaptation: keep the same lane
-  (`--session <source-id>` or no session), same `table=`, and same stable
-  `key=` values. The retry appends to the same ledger, retains already-complete
-  rows from the same dry/live mode, and updates changed cells in place.
-- Clean redo, comparison, or new batch: use a new stable `--session <name>` or
-  `--session auto` so the dashboard gets a separate historical run.
+- source lock present: wait for the named process or deliberately stop it;
+- process exit: rerun with the same source and lane;
+- pending external intent: inspect the destination and complete reconciliation;
+- input fingerprint change: review the new input and choose update-in-place or a
+  separate lane;
+- schema or policy event: fix the source, transform, contract, or policy and
+  replay the affected keys;
+- quality gate pause: review the measured batch and resume after the threshold
+  or workflow rule is intentionally updated.
 
-Use `--session auto` for a separate intentional run. Rely on the same lane
-(re-run with no session) for failure recovery on the same source data, so the
-dashboard updates the existing rows in place.
+## Parallel Sources, Throttling, And Ceilings
 
-### When a run is already active
-
-Use `source=` for new workflows so the scope comes from an actual source
-identity rather than a friendly label. If a lock refuses to start, wait for the
-holder or deliberately stop the named PID before starting fresh. A duplicate
-run can create duplicate provider charges, CRM or sheet writes, and corrupted
-history.
-
-## Event vocabulary (what the dashboard understands)
-
-The dashboard renders any JSON events, but these names get first-class
-treatment (plain-English lines + table columns + counters):
-
-| event                | fields                                          | rendering |
-|----------------------|-------------------------------------------------|-----------|
-| `run_started`        | `companies`/`todo`, `worst_case_credits`        | run progress card |
-| `run_finished`       | any stats                                       | run progress card |
-| `bc_submitted`*      | `round`, `leads`, `contacts:[{name,company,tier}]` | marks rows "searching…" |
-| `bc_credits`*        | `credits_consumed`, `credits_left`              | credit counters (single provider) |
-| `credits`            | `provider`, `used`, `left`                      | one credit chip **per provider** — emit one per provider (blitz, ai-ark, moltsets…) |
-| `phone_found`        | `company`, `name`, `phone`, `tier`              | green pill in Phone column |
-| `phone_not_found`    | `company`, `name`                               | amber "not found" |
-| `email_found`        | `company`, `name`, `email`, `source`            | green pill in Email column |
-| `email_not_found`    | `company`, `name`                               | amber "not found" |
-
-\* `bc_*` are example event names from a phone/email-enrichment use case; reuse
-them for any provider, or add your own mapping in `humanize()` in `run_dashboard.py`.
-
-Rules of thumb: always include `company` + `name` on per-record events (that's
-the table's row key); anything without them lands in the "Run progress" card.
-Give every run a human description: `ledger(scope, 'run_started',
-description='Phone enrichment for July wholesale batch', ...)` — the dashboard
-shows it in the run list and header (falls back to composing one from
-companies/credits/table fields).
-Generic events render fine too — `{"event": "whatever", ...fields}` becomes a
-timeline line.
-
-The dashboard also reads a second format automatically (the push-library style):
-`events.jsonl` rows `{ts, level, verb, phase, action, details}` and
-`api-calls.jsonl` rows `{ts, provider, endpoint, status_code, ...}` in
-per-run subdirectories.
-
-## Parallel datasets + shared-API throttling
-
-Two runs on two DIFFERENT datasets may run side by side; the same dataset twice
-must refuse. The pattern:
+Use one source-derived lock for each dataset identity. Parallel runs earn their
+separate scopes when the datasets are provably disjoint. Shared destinations
+gain idempotent operation keys, and shared provider accounts gain one throttle
+resource name:
 
 ```python
-acquire_lock(f'enrich-{table}')   # per-dataset scope: alpha ∥ beta, alpha×2 refuses
-...
-throttle('provider-name', 5)      # before EVERY request to a shared API
+throttle('provider-account:production', 5)
+response = provider_call(payload)
 ```
 
-`throttle(resource, per_second)` is a CROSS-PROCESS rate limiter (flock-based,
-POSIX): all concurrent runs calling it with the same resource string
-collectively stay at `per_second`, first-come-first-served — verified: two
-processes against a 5/s limit measured a combined 4.99/s with no slot
-collisions. Use one resource string per provider ACCOUNT, since rate limits
-are account-level, not per-script.
+`throttle()` coordinates local processes through an advisory file lock. Every
+process using the same resource string shares the configured request rate.
 
-Two safety conditions before you parallelize:
-1. The datasets must be PROVABLY disjoint (no shared records) — the
-   "in-flight ≤ remaining need" credit invariant only holds within one
-   process, so overlapping records across two runs can double-spend.
-2. Every shared API gets `throttle()` — the per-dataset lock protects the
-   data, the throttle protects the provider account.
+Encode a hard maximum for spend, successful paid results, messages, writes, and
+deletes. For providers that charge per result, submit work bounded by each
+entity's remaining need and check already-saved outcomes before submission.
 
-Try it: `example_worker.py --table alpha` and `--table beta` in two terminals
-(parallel, jointly throttled), then `--table alpha` in a third (refuses).
+## Dashboard Event Contract
 
-## Input/output sources — anything goes, with one rule
+The dashboard renders arbitrary JSON fields. These events receive first-class
+behavior:
 
-The "table" a worker runs over can be a CSV, a JSON file, a Supabase/Postgres
-query, a Google Sheet, an API — the guard pieces stay independent of it. Normalize
-whatever you load into `entity → ordered candidates` and go. Two rules:
+| Event | Important fields | Purpose |
+|---|---|---|
+| `run_started` | `description`, `todo`, `progress_table`, `summary_metrics` | open an attempt |
+| `run_manifest` | source snapshot, destination, versions, hashes | establish provenance |
+| `record` | `table`, `key`, arbitrary columns, optional `error` | create or update a row |
+| `metric` | `metric`, `value`, `increment` | update counters |
+| `checkpoint` | `checkpoint`, `value` | show durable progress |
+| `credits` | `provider`, `used`, `left` | show provider spend separately |
+| `write_intent` | operation key, record key, destination | reserve delivery |
+| `write_receipt` | operation key, destination ID, status | confirm delivery |
+| `dead_letter` | record key, error, retry, payload reference | target recovery |
+| `control_acknowledged` | control ID, kind, note | confirm worker action |
+| `run_paused` | reason | close a paused attempt |
+| `run_finished` | status, counters, checkpoints | close success |
+| `run_failed` / `run_abandoned` | `error`, counters, checkpoints | close failure |
 
-1. **Land results in a durable, re-readable store** (DB row updates, a
-   Sheet via API, or an append-only checkpoint file). Resume by re-reading that
-   store at plan time and skip anything that already has a value or an
-   attempted-outcome marker. Append or patch records rather than rewriting a
-   whole CSV in place mid-run, so a crash mid-write preserves existing state.
-2. **Derive the lock scope from the dataset's identity** (table name, sheet ID,
-   file path) — e.g. `acquire_lock(f'enrich-{sheet_id}')` — so the same dataset
-   refuses to run twice no matter which script or session starts it.
+The JSONL ledger remains append-only. The dashboard folds `record` events by
+attempt, dry/live mode, table, and key to present the latest row while retaining
+the event history for timeline inspection. Fresh clients fetch large ledgers in
+chunks and immediately continue until caught up.
 
-## How to adapt to a new project (agent checklist)
+## Production Verification
 
-1. Copy `runguard.py` next to your scripts. Set `RUNGUARD_STATE_DIR` (env var)
-   or edit `_STATE_DIR` — this is where locks and ledgers live.
-2. In every script that spends or mutates:
-   - `acquire_lock('<scope>')` before the first spend/write. One scope per
-     resource (e.g. `crm-write`, `sourcing`, `phone-enrich`) — unrelated
-     scripts must not block each other.
-   - `ledger('<scope>', 'run_started', ...)` / `'run_finished'` and one event
-     per meaningful outcome, following the vocabulary above.
-   - Emit progress from inside every slow item loop, provider batch, thread
-     pool, scraper page, cache-fill loop, and external write loop. Make the
-     first visible dashboard update arrive from the work loop itself, not a
-     final merge/write pass.
-   - If a shared client library makes the writes, acquire the lock INSIDE the
-     library's mutating call (gate on HTTP method, exempt read-only POSTs like
-     search endpoints) — then every future script inherits the guard for free.
-3. Copy `run_dashboard.py`, edit the `SOURCES` dict at the top to point at your
-   ledger/state directories, run it: `python3 run_dashboard.py` →
-   http://localhost:8484.
-4. If your provider charges per result: implement the spend rules from the
-   "Why it exists" section (ceiling = worst-case need; in-flight ≤ remaining
-   need per entity; skip records whose outcome column/field is already set
-   from a previous run, so each entity is processed only once).
+Prove the harness against real workflow behavior before the full dataset:
 
-## Scaling path — keep the ledgers as append-only JSONL files
+1. Run `observer-kit doctor .` and the emit/durability linter.
+2. Start the dashboard before a representative dry-run sample.
+3. Compare dashboard rows and counters with the raw JSONL.
+4. Compare each completed sample row with its durable result store.
+5. Force a failure after several saved items and resume the same lane.
+6. Start a second process on the same source and confirm lock refusal.
+7. Exercise pause or stop and confirm worker acknowledgement at a boundary.
+8. Reconcile external intents and receipts with destination state.
+9. Verify later enrichment updates the same rows and a comparison session opens
+   a separate dashboard view.
+10. Present writes, skips, errors, schema findings, spend, ceilings, and restart
+    evidence for explicit approval.
 
-The write path stays append-only JSONL files, deliberately. Reasons: N
-concurrent processes append with zero contention (a DB would reintroduce
-write-lock coordination between the very processes the locks keep apart);
-a half-written final line is deferred until complete instead of being treated as
-a record; events are schemaless (new fields cost nothing, no migrations across copies);
-and the ledgers stay greppable, attachable, and portable ("copy this folder"
-is the kit's superpower).
+## Runtime Files And APIs
 
-When you want CROSS-RUN analytics ("credits per provider this month",
-"hit rate by tier across all runs"), add a QUERY layer on top instead of
-changing storage — DuckDB reads the JSONL directly:
+- `runguard.py`: runtime library vendored beside the workflow.
+- `run_dashboard.py`: one localhost server for a state directory.
+- `watch_chat.py`: watcher transport for dashboard messages and controls.
+- `EXPLAIN.md`: operator-facing statement of intent copied into `.runguard`.
+- `references/lint_emit.py`: static liveness/durability heuristic.
+- `example_worker.py`: deterministic dry-run, full-run, and resume example.
 
-```sql
-SELECT event, count(*), sum(credits_consumed)
-FROM read_json_auto('.runguard/*.jsonl', filename=true)
-GROUP BY event;
-```
+Core helpers:
 
-One `pip install duckdb` (or the CLI binary) and the whole ledger history is a
-queryable database VIEW while the files remain the source of truth. Full SQL
-storage only becomes right if runs go multi-machine or you need retention
-policies over tens of thousands of runs. If you are an agent considering
-migrating this to SQLite/Postgres: read the paragraph above first — keep the
-JSONL files as the source of truth and query them with DuckDB.
-
-## Files
-
-- `runguard.py` — the lock + ledger + throttle module (env-configurable dir)
-- `run_dashboard.py` — the localhost observer, a SAMPLE (edit SOURCES + remap
-  `humanize()` for your workflow)
-- `EXPLAIN.md` — template for the plain-English + ASCII "statement of intent"
-  the dashboard's "How it works" tab renders; the agent rewrites it per project
-- `example_worker.py` — end-to-end example worker (parallel datasets + throttle)
-- `sample-ledger.jsonl` — demo data; select it in the dashboard to see the table
-  render without running anything
+- identity and lifecycle: `input_snapshot`, `start_observed_run`,
+  `acquire_lock`, `ledger`, `success`, `fail`;
+- rows and progress: `step`, `count`, `checkpoint`, `lineage`;
+- review and policy: `preview`, `validate`, `allow_write`, `gate`, `simulate`;
+- delivery and recovery: `write_intent`, `write_receipt`, `reconcile`,
+  `dead_letter`, `replay_candidates`;
+- operator input: `check_controls`, `read_chat`, `post_chat`,
+  `wait_for_feedback`;
+- shared limits: `throttle`.

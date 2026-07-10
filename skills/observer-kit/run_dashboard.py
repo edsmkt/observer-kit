@@ -340,6 +340,17 @@ def read_events(run_id, offsets):
     return events, new_offsets
 
 
+def has_more_events(run_id, offsets):
+    """Whether an incremental client has more complete ledger bytes to fetch."""
+    for path in _files_for(run_id):
+        try:
+            if int(offsets.get(path, 0)) < os.path.getsize(path):
+                return True
+        except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+            continue
+    return False
+
+
 PAGE = """<!doctype html><meta charset="utf-8"><title>Run observer</title>
 <link id=favicon rel="icon" href="">
 <style>
@@ -1524,6 +1535,7 @@ function activityStrip(flatRecords, errors){
 }
 
 async function poll(){
+  let more=false;
   try{
     currentLocks=await (await fetch('/api/locks')).json();
     renderBridge();
@@ -1549,12 +1561,13 @@ async function poll(){
     if(sel){
       const res=await (await fetch('/api/events?run='+encodeURIComponent(sel)+'&offsets='+encodeURIComponent(JSON.stringify(offsets)))).json();
       offsets=res.offsets;
+      more=Boolean(res.more);
       if(res.events.length){all.push(...res.events);render();}
     }
     await loadControls();
     await loadChat();
   }catch(err){/* server restarting — retry */}
-  setTimeout(poll,2000);
+  setTimeout(poll,more?0:2000);
 }
 function pick(id,fromHash){
   sel=id;selMeta=(window._runs||[]).find(r=>r.id===id)||null;offsets={};all=[];controls=[];
@@ -1722,7 +1735,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(offsets, dict):
                 offsets = {}
             events, new_offsets = read_events(run_id, offsets)
-            self._json({'events': events, 'offsets': new_offsets})
+            self._json({'events': events, 'offsets': new_offsets,
+                        'more': has_more_events(run_id, new_offsets)})
         else:
             self.send_response(404)
             self.end_headers()

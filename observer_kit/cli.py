@@ -104,6 +104,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         [sys.executable, str(skill_file("test_runguard.py")), str(SKILL_DIR)],
         [sys.executable, str(skill_file("test_data_movement.py")), str(SKILL_DIR)],
         [sys.executable, str(skill_file("test_lint_emit.py"))],
+        [sys.executable, str(skill_file("test_skill.py")), str(SKILL_DIR)],
         [sys.executable, str(skill_file("test_dashboard.py"))],
         [sys.executable, str(skill_file("test_cli.py"))],
     ]

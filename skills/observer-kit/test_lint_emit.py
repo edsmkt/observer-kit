@@ -61,7 +61,7 @@ main()
 """)
 ok("emit-inside-loop passes (exit 0)", rc == 0, f"rc={rc}; {out[:120]}")
 
-# 3. Thread-pool completion emit MUST pass (exit 0) — the source_contacts.py shape
+# 3. Thread-pool completion persists and emits each completed result (exit 0).
 rc, out, err = run_lint("""
 from runguard import ledger
 from concurrent.futures import as_completed, ThreadPoolExecutor
@@ -73,12 +73,29 @@ def main():
         for f in as_completed(futs):
             vat, people = f.result()
             results[vat] = people
+            append_contact(vat, people)  # durable sink in the completion loop
             ledger('scope', 'record', table='contacts', key=str(vat))  # emitted from completion loop
 main()
 """)
-ok("thread-pool completion emit passes (exit 0)", rc == 0, f"rc={rc}; {out[:120]}")
+ok("thread-pool completion persistence passes (exit 0)", rc == 0, f"rc={rc}; {out[:120]}")
 
-# 4. No record emits at all MUST pass (not our concern)
+# 4. Progress heartbeats cannot hide memory-only provider results.
+rc, out, err = run_lint("""
+from runguard import ledger
+def main():
+    todo = [{'id': 1}]
+    results_by_vat = {}
+    for company in todo:
+        results_by_vat[company['id']] = fetch_paid_provider(company)
+        ledger('scope', 'progress', phase='provider', done=1, total=1)
+    for company in todo:
+        ledger('scope', 'record', table='contacts', key=company['id'], **results_by_vat[company['id']])
+main()
+""")
+ok("progress-only memory buffering is flagged", rc == 1, f"rc={rc}; {out[:160]}")
+ok("durability failure is named", 'DURABILITY MISSING' in out, out[:160])
+
+# 5. No work or record events at all MUST pass (not our concern)
 rc, out, err = run_lint("""
 print('hello')
 """)

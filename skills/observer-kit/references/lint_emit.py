@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Lint an agent-written batch script for the #1 observer-kit violation:
+"""Lint an agent-written batch script for two observer-kit violations:
 
     buffering all provider results in memory and emitting `record` ledger
     rows only in a final flush block (instead of as work lands).
+
+    reporting progress while the actual result remains memory-only until a
+    final write. A live dashboard is not a durable resume point.
 
 This defeats live dashboard visibility and loses everything if the process
 crashes mid-run. Run it on any script before the full run:
@@ -21,6 +24,9 @@ Because agents write many shapes, we also look for the canonical smell:
   - a results dict/list is populated inside a loop, AND
   - the only ledger('record') calls are in a later block that ranges over the
     same items (a flush), with no emit inside the loop.
+  - a results container is populated in a work loop but there is no apparent
+    durable sink call in that loop or completion callback. Progress/metric
+    ledger calls alone do not count as persistence.
 """
 import argparse
 import ast
@@ -82,11 +88,20 @@ def analyze(path):
             fname = fn.name if fn else '<module>'
             record_emit_sites.append((fname, node))
 
-    if not record_emit_sites:
-        return []  # no record emits at all — not our concern
-
     # Find the loop(s) that mutate a results container (the "work" loop)
     work_loops = _find_result_mutating_loops(tree, work_names)
+
+    # A result held only in memory after a provider phase is neither resumable
+    # nor durable, even if the script emits lively progress heartbeats. Require
+    # an apparent sink call from that loop (or a helper it invokes).
+    durability_violations = [
+        ('DURABILITY_MISSING', loop.lineno)
+        for loop in work_loops
+        if not _loop_has_durable_write(loop, tree)
+    ]
+
+    if not record_emit_sites:
+        return durability_violations
 
     # A record emit is VALID only if it is inside a work loop (the same loop that
     # mutates results), or inside a function called from a work loop.
@@ -107,7 +122,7 @@ def analyze(path):
     if buffered and violations:
         violations.append(('BUFFERED_FLUSH', buffered))
 
-    return violations
+    return violations + durability_violations
 
 
 def _enclosing_function(tree, node):
@@ -177,6 +192,53 @@ def _emit_in_any_work_loop(node, tree, work_names):
     return False
 
 
+def _loop_has_durable_write(loop, tree):
+    """Return whether a result-mutating loop appears to persist its result.
+
+    This is intentionally a conservative static heuristic. A helper such as
+    append_result(), save_row(), write_to_sheet(), or a direct file/database
+    write is enough to pass; progress(), count(), checkpoint(), and ledger()
+    are observability only and deliberately do not count.
+    """
+    for call in [n for n in ast.walk(loop) if isinstance(n, ast.Call)]:
+        if _is_durable_write_call(call):
+            return True
+        called = _called_name(call)
+        if called and _helper_has_durable_write(tree, called):
+            return True
+    return False
+
+
+def _called_name(call):
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+def _is_durable_write_call(call):
+    name = (_called_name(call) or '').lower()
+    if name in {'ledger', 'progress', 'count', 'checkpoint', 'metric', 'step'}:
+        return False
+    # Generic but intentionally broad names used by local files, DBs, sheets,
+    # APIs, and explicit durable checkpoint helpers.
+    durable_words = ('write', 'append', 'insert', 'upsert', 'persist', 'save',
+                     'commit', 'receipt', 'checkpoint', 'dump', 'store')
+    if any(word in name for word in durable_words):
+        return True
+    return False
+
+
+def _helper_has_durable_write(tree, name):
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        if fn.name != name:
+            continue
+        return any(_is_durable_write_call(call)
+                   for call in ast.walk(fn) if isinstance(call, ast.Call))
+    return False
+
+
 def _node_in_loop_body(loop, node):
     for child in ast.iter_child_nodes(loop):
         if child is loop.iter:
@@ -225,18 +287,22 @@ def main():
         sys.exit(2)
 
     if not violations:
-        print(f'OK — {args.script}: record events are emitted incrementally (inside work loops).')
+        print(f'OK — {args.script}: record events and durable results are emitted inside work loops.')
         sys.exit(0)
 
-    print(f'VIOLATION in {args.script}: record ledger events are NOT emitted from inside a per-item loop.')
-    print('  This buffers results in memory and flushes only at the end — breaking live')
-    print('  dashboard visibility and losing everything if the process crashes mid-run.')
+    print(f'VIOLATION in {args.script}: incremental observability or durability is missing.')
+    if any(kind == 'DURABILITY_MISSING' for kind, _ in violations):
+        print('  DURABILITY MISSING: a results container is populated in a work loop,')
+        print('  but no durable result write is visible there. Progress events do not')
+        print('  protect paid work from a crash or make --resume skip it.')
+    if any(kind != 'DURABILITY_MISSING' for kind, _ in violations):
+        print('  RECORD EMIT MISSING: record ledger events are outside the work loop.')
     print()
-    print('  Fix: emit the record row the moment each item is processed (inside the loop),')
-    print('  or call your emit helper from inside the loop / thread-pool completion block.')
+    print('  Fix: persist the result and emit its record in the same item loop or')
+    print('  completion callback, then checkpoint only after that durable boundary.')
     print()
     for fname, lineno in violations:
-        if isinstance(lineno, int):
+        if fname != 'DURABILITY_MISSING' and isinstance(lineno, int):
             print(f'  - record emit in {fname}() at line {lineno} is outside any work loop')
     print()
     print('  See SKILL.md > "Emit records as work lands" for the correct pattern.')
