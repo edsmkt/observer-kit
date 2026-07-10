@@ -49,6 +49,20 @@ observer-kit --help
 python3 -m observer_kit --help
 ```
 
+When both probes fail, install the CLI before project setup. Reuse a writable
+project virtual environment or isolated tool environment and install from the
+public repository with its selected interpreter:
+
+```bash
+python3 -m pip install git+https://github.com/edsmkt/observer-kit.git
+python3 -m observer_kit --help
+```
+
+Repeat both probes and retain the exact successful prefix. Package-manager,
+network, or permission constraints lead to the bundled-script path plus a
+concise setup note for the operator. A user-requested skill-only setup follows
+that same path directly.
+
 The CLI helper path uses that prefix for `init`, `dashboard`, `run`, `watch`,
 `reply`, `doctor`, and `test`.
 

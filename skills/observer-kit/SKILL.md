@@ -21,17 +21,17 @@ Build every run around two separate guarantees:
 
 Resolve relative paths from the directory containing this `SKILL.md`.
 
-Read the Observer Kit README from the first available location:
+Read the Observer Kit README from the repository checkout
+[`../../README.md`](../../README.md) or the
+[public repository](https://github.com/edsmkt/observer-kit/blob/main/README.md).
+Use it to learn the product promise, skill/CLI split, operator journey, and dashboard expectations.
 
-- repository checkout: [`../../README.md`](../../README.md)
-- standalone installation:
-  [`github.com/edsmkt/observer-kit/README.md`](https://github.com/edsmkt/observer-kit/blob/main/README.md)
-
-Use it to learn the product promise, skill/CLI split, operator journey, and
-dashboard expectations.
-
-Run `observer-kit --help`. Choose the CLI helper path when it succeeds; choose
-the bundled-script path in `references/pattern.md` for a skill-only install.
+Establish a verified CLI command prefix before project setup. Probe
+`observer-kit --help`, then `python3 -m observer_kit --help`. When both probes
+fail, install the CLI from the public repository into a writable Python
+environment using the README command, then repeat the probes. Use the
+bundled-script path in `references/pattern.md` when installation remains
+unavailable or the user selects a skill-only setup.
 
 Choose the active branch and load its reference:
 

@@ -107,9 +107,11 @@ process; the script pauses at a checkpoint where it has recorded its progress.
 ## Install
 
 Observer Kit has two separate pieces. The skill contains the playbook and
-standalone Python helpers, so an agent can wire and run a workflow from the skill
-installation alone. The optional CLI makes setup, launch, watching, and checks
-shorter and repeatable.
+standalone Python helpers. The CLI makes setup, launch, watching, and checks
+shorter and repeatable. During agent-led setup, the skill checks for the CLI,
+installs it in a writable Python environment when needed, and verifies it before
+initializing the project. The bundled helpers remain available for skill-only
+setups and environments where package installation is unavailable.
 
 Install the skill for all local projects:
 
@@ -123,8 +125,7 @@ Or add it only to the current project:
 npx skills add edsmkt/observer-kit
 ```
 
-Optionally install the CLI directly from GitHub into a writable Python
-environment:
+Install the CLI directly from GitHub into a writable Python environment:
 
 ```bash
 python3 -m pip install git+https://github.com/edsmkt/observer-kit.git
@@ -141,7 +142,7 @@ observer-kit --help
 
 ## Start A Project
 
-With the optional CLI, run these commands from the project containing your
+With the CLI, run these commands from the project containing your
 workflow script:
 
 ```bash
@@ -240,7 +241,7 @@ For implementation patterns and event vocabulary, see
 [skills/observer-kit/references/pattern.md](skills/observer-kit/references/pattern.md).
 The agent skill is at [skills/observer-kit/SKILL.md](skills/observer-kit/SKILL.md).
 
-## Optional CLI Reference
+## CLI Reference
 
 ```bash
 observer-kit init [project]

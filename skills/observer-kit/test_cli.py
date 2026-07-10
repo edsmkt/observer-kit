@@ -35,7 +35,7 @@ if cli_probe.returncode != 0:
         print(cli_probe.stderr.strip())
         sys.exit(1)
     print("Testing Observer Kit CLI end to end\n")
-    print("  SKIP Python CLI is a separate optional install; bundled skill scripts are available.")
+    print("  SKIP Python CLI is a separate install; bundled skill scripts are available.")
     sys.exit(0)
 
 

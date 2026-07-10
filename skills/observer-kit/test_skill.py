@@ -229,6 +229,13 @@ ok('skill supports both CLI-helper and bundled-script launch paths',
    'python3 -m observer_kit --help' in pattern and
    'run_dashboard.py .runguard --port 8484' in pattern and
    'watch_chat.py <run-id> --state-dir .runguard --follow' in pattern)
+ok('cold-start setup installs and verifies a missing CLI',
+   'Establish a verified CLI command prefix before project setup' in skill and
+   'install the CLI from the public repository into a writable Python environment' in skill_words and
+   'then repeat the probes' in skill_words and
+   'python3 -m pip install git+https://github.com/edsmkt/observer-kit.git' in pattern and
+   'Repeat both probes and retain the exact successful prefix' in pattern_words and
+   'Package-manager, network, or permission constraints lead to the bundled-script path' in pattern_words)
 ok('operator explainer is generic and ready for branch selection',
    all(branch in explain_words for branch in branch_ids) and
    all(term in explain_words for term in (
