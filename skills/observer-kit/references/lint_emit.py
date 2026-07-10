@@ -832,7 +832,7 @@ def main():
         sys.exit(2)
 
     if not violations:
-        print(f'OK - {args.script}: No common buffered-output, row-liveness, summary-contract, or durability violation detected.')
+        print(f'OK - {args.script}: No common buffered-output, ROW_LIVENESS_MISSING, SUMMARY_METRICS_MISSING, or DURABILITY_MISSING violation detected.')
         print('  Static analysis is heuristic; confirm the durable boundary with a forced crash/resume sample.')
         sys.exit(0)
 

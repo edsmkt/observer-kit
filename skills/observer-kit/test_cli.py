@@ -126,6 +126,10 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
        (project / "runguard.py").is_file() and (project / "watch_chat.py").is_file())
     ok("init creates a private state dir", (state / "EXPLAIN.md").is_file() and
        (state / ".gitignore").read_text(encoding="utf-8") == "*.lock\n*.throttle\n*.jsonl\n")
+    ok("CLI init vendors byte-identical bundled helpers",
+       (project / "runguard.py").read_bytes() == (REPO_ROOT / "skills" / "observer-kit" / "runguard.py").read_bytes() and
+       (project / "watch_chat.py").read_bytes() == (REPO_ROOT / "skills" / "observer-kit" / "watch_chat.py").read_bytes() and
+       (state / "EXPLAIN.md").read_bytes() == (REPO_ROOT / "skills" / "observer-kit" / "EXPLAIN.md").read_bytes())
 
     doctor = cli("doctor", str(project), cwd=project)
     ok("doctor accepts a fresh project", doctor.returncode == 0, doctor.stdout + doctor.stderr)

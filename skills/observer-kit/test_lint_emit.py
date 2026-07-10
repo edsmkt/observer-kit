@@ -188,7 +188,7 @@ ok("database upsert passes", rc == 0, f"rc={rc}; {out[:180]}")
 
 # 10. Success remains an explicitly heuristic result.
 ok("success message requires crash-resume proof",
-   'No common buffered-output' in out and 'row-liveness' in out and 'crash/resume' in out,
+   'No common buffered-output' in out and 'ROW_LIVENESS_MISSING' in out and 'crash/resume' in out,
    out[:180])
 
 # 11. No work or record events at all MUST pass (not our concern)

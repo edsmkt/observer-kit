@@ -111,6 +111,9 @@ business rows.
 The dashboard runs only on localhost. It reads the JSONL ledger the workflow
 writes while it works.
 
+It assumes a trusted local machine. Do not forward the dashboard port or expose
+it on a network.
+
 The **Data** tab shows one row per source item. The columns come from the
 workflow itself: a company-sourcing run might show domains, qualification,
 LinkedIn, email, and sheet status; another workflow might show entirely
@@ -188,6 +191,12 @@ package installation is unavailable.
 The CLI keeps the established `observer-kit` command so existing projects and
 install instructions continue to work.
 
+Use the skills as the source of truth for operator behavior: how the agent
+selects a sample, interprets dashboard controls, fixes a run, and asks for
+full-run approval. Use the CLI as the repeatable local plumbing for the same
+contract. See the [install matrix](docs/install-matrix.md) for the supported
+paths and compatibility expectations.
+
 Install the repository's skills for all local projects:
 
 ```bash
@@ -259,6 +268,12 @@ observer-kit watch .runguard --status
 ```
 
 The watcher remains transport; your agent makes decisions and requests full-run approval.
+
+The ledger is append-only JSONL by design. For very long backfills, split work
+into bounded runs or chunks with stable source identities, persist authoritative
+results in a durable store, and keep raw provider responses to samples or debug
+cases. The dashboard is for live review and audit, not a replacement for the
+workflow's durable destination.
 
 ## A Simple Script
 

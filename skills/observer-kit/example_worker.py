@@ -10,7 +10,7 @@ Start the dashboard first, then run a reviewed sample and an intentional write:
 Use ``--table beta`` for a disjoint source that can run concurrently. A second
 ``alpha`` process receives the source-lock warning. Every simulated provider
 call shares one cross-process throttle, and every full-run row is appended and
-fsynced before its dashboard checkpoint.
+flushed to disk before its dashboard checkpoint.
 """
 from __future__ import annotations
 
