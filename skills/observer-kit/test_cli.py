@@ -18,10 +18,25 @@ from urllib.request import Request, urlopen
 passed = failed = 0
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLI_ENV = os.environ.copy()
-if (REPO_ROOT / "observer_kit" / "__init__.py").is_file():
+SOURCE_PACKAGE = REPO_ROOT / "observer_kit" / "__init__.py"
+SOURCE_CHECKOUT = (REPO_ROOT / "pyproject.toml").is_file()
+if SOURCE_PACKAGE.is_file():
     # Source checkout: subprocesses intentionally run from a fresh target
     # project, so preserve the package import path explicitly.
     CLI_ENV["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + CLI_ENV.get("PYTHONPATH", "")
+
+cli_probe = subprocess.run(
+    [sys.executable, "-B", "-c", "import observer_kit"],
+    env=CLI_ENV, capture_output=True, text=True, timeout=10,
+)
+if cli_probe.returncode != 0:
+    if SOURCE_CHECKOUT:
+        print("FAIL Observer Kit CLI package is missing from its source checkout")
+        print(cli_probe.stderr.strip())
+        sys.exit(1)
+    print("Testing Observer Kit CLI end to end\n")
+    print("  SKIP Python CLI is a separate optional install; bundled skill scripts are available.")
+    sys.exit(0)
 
 
 def ok(name: str, condition: bool, detail: str = "") -> None:

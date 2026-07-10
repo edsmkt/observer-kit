@@ -1,58 +1,76 @@
 # What this run does
 
-A plain-English description of what this automated run will do — for anyone,
-technical or not. Read it **before** the run spends money or changes records. If
-any line here is wrong, stop the run (see "How to stop it") — nothing is lost.
-
-> This is an EXAMPLE. The agent that sets up your pipeline rewrites this file to
-> match what your run actually does, and refreshes it whenever the run changes.
+This is the operator-facing statement of intent for one observed workflow. The
+agent replaces every bracketed field before the sample run and refreshes this
+file whenever the source, transform, destination, ceilings, or run lane changes.
 
 ## In one sentence
 
-For each company that still needs contacts, find up to 2 phone numbers for the
-best-titled people and save them — without ever paying for the same person twice.
+[Describe the records being read, how they change, and where the completed
+results go.]
+
+## Source and destination
+
+- Source: [system, resolved path, sheet ID, table plus query, or export ID]
+- Stable source identity: [fingerprint or canonical identifier]
+- Stable record key: [field or composite key]
+- Bounded schema read: [endpoint or query and maximum sample entities]
+- Observed schema: [ledger `schema_observed` event and optional governed artifact]
+- Raw response field: [`response_json` or a governed `payload_ref`]
+- Durable result store: [path, table, or service that resume reads]
+- External destination: [shared file, CRM, database, spreadsheet, webhook, API,
+  or "durable result store only"]
+- Run lane: [update the current view or open a separate comparison view]
 
 ## The flow
 
-```
-   your work list  (CSV / database / spreadsheet)
-         |
-         v
-   +-----------+   only ONE run at a time — a second run refuses to start,
-   |   LOCK    |   so nothing is ever done twice or double-charged
-   +-----------+
-         |
-         v
-   for each company, best candidate first:
-         |
-         +--> provider 1 --+
-         +--> provider 2 --+   (rate-limited; budget shared across runs)
-         +--> provider 3 --+
-         |
-         v
-   stop at the cap        at most 2 phone numbers per company (credits cost money)
-         |
-         v
-   save to the store      fill-only: never overwrites what is already there
-         |
-         v
-   this dashboard         shows every result the moment it lands
+```text
+source snapshot
+      |
+      v
+source-derived lock -> representative dry-run sample -> user review
+      |
+      v
+read -> transform or enrich -> persist durable result -> emit dashboard row
+      |
+      v
+[optional external delivery -> confirmed receipt]
 ```
 
-## What it WILL do
+## Boundaries and ceilings
 
-- Try the best-titled contact at each company first, and stop once the cap is met.
-- Charge a credit only when a phone number is actually found.
-- Record every attempt and every credit spent in a local ledger you can audit.
+- Sample work limit: [earliest query, page, batch, or provider stop condition;
+  usually 5 to 25 stratified records]
+- Resume boundary: [one item or one bounded chunk]
+- Spend ceiling: [amount and unit]
+- Write ceiling: [maximum destination mutations]
+- Rate ceiling: [provider or destination rate]
+- Full-run approval: [pending or approved, with timestamp]
 
-## What it will NOT do
+## Verification branches
 
-- Never overwrite a phone number that already exists — it only fills blanks.
-- Never spend more than 2 credits per company.
-- Never run twice at once — the lock blocks a second start.
+Keep the selected branch IDs and replace each bracketed trigger reason. Remove
+the remaining examples before operator review.
 
-## How to stop it
+- `paid_provider`: [metered, credit, quota, or account-rate-limited call]
+- `external_destination`: [delivery beyond the authoritative durable result
+  store]
+- `long_running`: [loop, pool, or page set suited to operator pause or stop]
+- `schema_policy_quality`: [schema, policy, or quality threshold]
+- `iterative_comparison`: [updates, retries, redos, or comparison lanes]
 
-If something looks wrong, stop the run — press Ctrl-C in the terminal, or stop
-the process ID shown in the **Run info** tab. There is no cleanup to do: results
-already saved stay saved, and starting again simply resumes what is left.
+## Dashboard view
+
+- Tables and stable keys: [table -> key]
+- Projected columns: [fields chosen from the observed schema for the user's objective]
+- Headline metrics: [three to five scalar counters covering material outcomes]
+- Outcome coverage: [planned/write, skip, hold, missing, failure]
+- Progress source: [source table or item count]
+- Attention signal: [the explicit `error` field and its meaning]
+
+## Stop, resume, and review
+
+Pause or stop reaches the next durable boundary. Starting the same lane again
+reads the durable result store and selects the remaining work. Dashboard notes
+travel through the watcher to the active agent session for inspection, script
+changes, replies, and deliberate resume.

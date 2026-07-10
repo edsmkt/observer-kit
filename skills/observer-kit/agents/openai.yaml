@@ -1,4 +1,4 @@
 interface:
   display_name: "Observer Kit"
   short_description: "Visible, resumable data workflow harness"
-  default_prompt: "Use $observer-kit to adapt this data workflow with a reviewed sample, durable resume, live rows, and explicit full-run approval."
+  default_prompt: "Use $observer-kit to create or adapt this data workflow with a reviewed sample, durable resume, live rows, and explicit full-run approval."

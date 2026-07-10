@@ -1,3 +1,15 @@
+Metadata-Version: 2.1
+Name: observer-kit
+Version: 0.1.0
+Summary: Guardrails, ledgers, and a localhost dashboard for risky batch scripts
+Home-page: UNKNOWN
+Author: edsmkt
+License: MIT
+Platform: UNKNOWN
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+
 <h1 align="center">observer-kit</h1>
 
 <p align="center"><strong>For when your agent does the data work, but you still need to see it.</strong></p>
@@ -70,10 +82,6 @@ workflow itself: a company-sourcing run might show domains, qualification,
 LinkedIn, email, and sheet status; another workflow might show entirely
 different fields. Use **Filter columns** to combine text, category, and number
 filters while you inspect a large run.
-
-During the first sample, the agent can include a `response_json` cell containing
-the decoded response body from the real source call. Click it to inspect the full
-JSON, then tell the agent which fields should become normal columns for the run.
 
 The **Timeline** is the plain-English history of the run. **Attention** focuses
 on records that need a look. **How it works** shows the workflow's `EXPLAIN.md`
@@ -190,11 +198,6 @@ run = start_observed_run(
     dry_run=args.dry_run,
     todo=len(leads),
     progress_table='companies',
-    summary_metrics=[
-        {'key': 'processed', 'label': 'processed'},
-        {'key': 'planned', 'label': 'planned'},
-        {'key': 'written', 'label': 'written'},
-    ],
 )
 
 try:
@@ -205,7 +208,6 @@ try:
             result = enrich_lead(lead)
             if not run.dry_run:
                 update_crm_lead(lead.id, result)
-            run.count('planned' if run.dry_run else 'written')
             run.count('processed')
             run.checkpoint('last_lead', lead.id)
     run.success(processed=len(leads))
@@ -261,3 +263,5 @@ python3 -m observer_kit test
 ## License
 
 MIT
+
+

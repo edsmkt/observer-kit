@@ -160,8 +160,12 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
        'function controlAvailability()' in dashboard.PAGE and
        "summary.finished&&summary.dryRun" in dashboard.PAGE)
     ok("table inspection stays quiet until the operator Command-clicks to message the agent",
-       "if(!ev.metaKey&&!ev.ctrlKey)return;" in dashboard.PAGE and
+       "if(ev.metaKey||ev.ctrlKey){" in dashboard.PAGE and
        'Command/Ctrl-click = chat' in dashboard.PAGE and '[data-col]{cursor:default}' in dashboard.PAGE)
+    ok("structured record values open as pretty JSON on one click",
+       'function jsonCell(v)' in dashboard.PAGE and 'class=jsonOpen' in dashboard.PAGE and
+       "JSON.stringify(JSON.parse(jsonTrigger.dataset.json),null,2)" in dashboard.PAGE and
+       'Open full JSON' in dashboard.PAGE)
     ok("run monitor provides a direct conversation after a pause or stop",
        "function openRunChat()" in dashboard.PAGE and "openChat('run','Run'" in dashboard.PAGE and
        'Message agent' in dashboard.PAGE and "!e.target.closest('.bridgeActions')" in dashboard.PAGE)
@@ -180,6 +184,16 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
        'const previous=row.__prev?.[c];' in dashboard.PAGE and 'was ${esc(fmt(previous))}' in dashboard.PAGE)
     ok("completed runs surface reported credit spend without custom dashboard wiring",
        "'sheet_rows_appended','credits_spent','errors'" in dashboard.PAGE)
+    ok("nested terminal outcome totals remain visible as bounded headline metrics",
+       'function numericSummaryEntries(value' in dashboard.PAGE and
+       'numericSummaryEntries(fin).slice(0,8)' in dashboard.PAGE and
+       'numericSummaryEntries(e).slice(0,3)' in dashboard.PAGE and
+       'const summaryStart=chips.length;' in dashboard.PAGE)
+    ok("generic outcome rows count as landed source progress",
+       "!['running','queued','pending'].includes(status)" in dashboard.PAGE and
+       '`${completedProgress} / ${started.todo}`' in dashboard.PAGE)
+    ok("observed source schemas are readable in the timeline",
+       "case 'schema_observed'" in dashboard.PAGE and 'JSON field paths' in dashboard.PAGE)
     ok("live data updates preserve the operator's table position",
        'function captureTableScroll()' in dashboard.PAGE and 'function restoreTableScroll(state)' in dashboard.PAGE and
        'restoreTableScroll(tableScroll);' in dashboard.PAGE)

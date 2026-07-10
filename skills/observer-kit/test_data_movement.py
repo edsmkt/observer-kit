@@ -181,5 +181,27 @@ ok('simulation fixture is replayable and ledgered',
    [row['id'] for row in simulated] == ['a', 'b'] and
    any(e.get('event') == 'simulation' and e.get('records') == 2 for e in events(run)))
 
+# A bounded real response can establish the observed schema and remain inspectable.
+run = runguard.start_observed_run('schema-sample-demo', source='api:companies', dry_run=True,
+                                  summary_metrics=['sampled'])
+response = {
+    'id': 'company-1',
+    'properties': {'name': 'Acme', 'employees': 42, 'tags': ['saas', 'b2b']},
+}
+observed_response = run.schema_sample('companies', response['id'], response, name='Acme')
+run.count('sampled')
+run.success()
+schema_events = events(run)
+schema = next((event for event in schema_events
+               if event.get('event') == 'schema_observed'), {})
+sample_row = next((event for event in schema_events
+                   if event.get('event') == 'record' and event.get('table') == 'companies'), {})
+defensive_redaction = runguard._redact_sample(
+    {'authorization': 'unexpected-credential', 'result': {'id': 'company-1'}}, set())
+ok('schema samples store field types and the decoded response body',
+   schema.get('paths', {}).get('$.properties.employees') == ['integer'] and
+   sample_row.get('response_json') == response and observed_response == response and
+   defensive_redaction.get('authorization') == '[REDACTED]')
+
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

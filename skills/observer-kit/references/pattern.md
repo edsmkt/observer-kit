@@ -7,6 +7,7 @@ the runtime contracts, APIs, and examples that implement those steps.
 ## Contents
 
 - System boundaries
+- Helper availability and launch paths
 - Source identity and run lanes
 - Minimal wrapper
 - Operator view and record identity
@@ -37,6 +38,39 @@ Observer Kit is a local workflow harness with five pieces:
 
 The agent session remains the brain. The watcher supplies input, and the script
 acknowledges controls at its own durable boundaries.
+
+## Helper Availability And Launch Paths
+
+The skill installation and Python CLI are separate capabilities. Probe both CLI
+forms and use the first command prefix that succeeds:
+
+```bash
+observer-kit --help
+python3 -m observer_kit --help
+```
+
+The CLI helper path uses that prefix for `init`, `dashboard`, `run`, `watch`,
+`reply`, `doctor`, and `test`.
+
+The bundled-script path works directly from the directory containing
+`SKILL.md`. Copy `runguard.py` and `watch_chat.py` beside the workflow, create
+`.runguard`, and copy `EXPLAIN.md` into it. Start the dashboard as a long-lived
+process, then launch the sample through the active harness session:
+
+```bash
+python3 /absolute/skill/path/run_dashboard.py .runguard --port 8484
+python3 workflow.py --dry-run --limit 10
+```
+
+As soon as the worker prints `OBSERVER_RUN_STARTED <run-id>`, launch the
+run-scoped watcher in an independent monitor:
+
+```bash
+python3 watch_chat.py <run-id> --state-dir .runguard --follow
+```
+
+Keep the same dashboard and watcher alive for the approved full run. Both paths
+produce the same source locks, JSONL ledgers, controls, chat, and dashboard.
 
 ## Source Identity And Run Lanes
 
@@ -82,8 +116,8 @@ Choose lanes by intent:
 
 ## Minimal Wrapper
 
-Use `start_observed_run()` for new scripts and adapted scripts that fit the
-standard lifecycle:
+Use `start_observed_run()` for new scripts and unfamiliar existing scripts after
+tracing their actual CLI and work paths into the standard lifecycle:
 
 ```python
 from runguard import RunPaused, start_observed_run
@@ -134,6 +168,30 @@ approval contracts.
 The dashboard is generic. Design tables from the user's entities rather than
 from Observer Kit's examples.
 
+For an API, database, CRM, or other remote source, begin the dry run with one
+bounded read that reaches the real endpoint and returns representative entities.
+Capture each selected entity with the wrapper:
+
+```python
+observed_response = run.schema_sample(
+    'companies', company_id, response,
+    sensitive_fields={'provider_specific_secret'},
+    name=response.get('name'), outcome='schema_sample', error='',
+)
+```
+
+Pass the decoded API response body to `run.schema_sample()`. Request bodies,
+headers, and authorization stay in the API client. The helper emits a cumulative
+`schema_observed` path/type profile and a normal record row whose `response_json`
+object opens in the dashboard JSON viewer. Credential-like response fields
+become `[REDACTED]`; `sensitive_fields` adds provider-specific names. Use one
+entity per sample row. Governed or very large responses stay in their governed
+store and use a small representative object plus `payload_ref` in the ledger.
+
+Choose projected columns from the observed fields and the user's objective.
+Present that projection beside the raw samples and let the user ask for changes
+through the JSON cell, a column header, or the run chat before full execution.
+
 Every business row uses:
 
 ```python
@@ -150,6 +208,12 @@ ledger(scope, 'record', table='orders', key=order_id,
 - a later event with the same `table` and `key` updates the row in place and
   retains fields supplied by earlier events.
 
+Emit a record for every material outcome: planned write, confirmed write,
+already-correct skip, held conflict, missing source entity, and failure. Set a
+concise `error` for outcomes that need operator attention and `error=''` for
+healthy or expected outcomes. Build the dry-run preview as a stratified sample
+so uncommon holds, missing entities, and failures remain inspectable.
+
 `run.step(name, **fields)` reserves `name` for the step label. Use `label` or
 `entity_name` for a business name during the step, then emit the operator-facing
 `name` field in the completed record or receipt update.
@@ -161,8 +225,10 @@ outcome on the same business row so `pending` changes to `appended`, `updated`,
 `inserted`, `skipped`, or `failed` in one column.
 
 Choose three to five `summary_metrics` that answer the operator's main questions.
-Emit additional counters for audit value while keeping the headline strip
-compact.
+Each selected key maps to a scalar numeric field on `run_finished`, `run_failed`,
+`run_paused`, or `run_abandoned`. Emit additional counters for audit value while
+keeping the headline strip compact. Reconcile each material outcome counter with
+the folded record rows during the sample.
 
 ## Durable Boundaries And Resume
 
@@ -210,8 +276,9 @@ from the authoritative durable store and retains the existing checkpoint.
 
 Run `references/lint_emit.py` against every agent-written batch script. It checks
 for final record flushes and for result containers that advance while the script
-offers progress events in place of a durable sink. Treat its zero exit as one
-piece of evidence and confirm the real sink during the sample.
+offers progress events in place of a durable sink. It also checks that repeated
+progress loops have a stable record-row path. Treat its zero exit as one piece
+of evidence and confirm the real sink during the sample.
 
 ## External Delivery
 
@@ -274,6 +341,15 @@ store and place hashes or `payload_ref` values in the ledger.
 
 Emit from the place where work becomes authoritative.
 
+For a dry-run sample, thread the sample limit into the earliest source query,
+page, batch, or provider loop. Stop discovery when the representative table rows
+reach that boundary, so sample time and source work stay proportionate.
+
+During every slow discovery, read, transform, or write phase, emit stable entity
+records as each entity becomes known. A phase that produces authoritative data
+only at completion updates one stable phase row while it runs. Progress events
+accompany these rows and provide counts or percentages.
+
 For a sequential loop, persist and emit per item:
 
 ```python
@@ -299,10 +375,10 @@ with ThreadPoolExecutor(max_workers=workers) as pool:
         run.checkpoint('last_record', row['id'])
 ```
 
-For provider batches, emit a `batches` row or progress event before submission,
-persist the response after completion, then update that same batch row. Keep
-stdout and stderr unbuffered with `python3 -u`, `PYTHONUNBUFFERED=1`, or
-`flush=True` so logs and ledger timing agree.
+For provider batches, emit a stable `batches` row before submission, persist the
+response after completion, then update that same row. Emit progress alongside
+the row for counts or percentages. Keep stdout and stderr unbuffered with
+`python3 -u`, `PYTHONUNBUFFERED=1`, or `flush=True` so timing agrees.
 
 ## Controls, Chat, And Watchers
 
@@ -389,6 +465,7 @@ behavior:
 |---|---|---|
 | `run_started` | `description`, `todo`, `progress_table`, `summary_metrics` | open an attempt |
 | `run_manifest` | source snapshot, destination, versions, hashes | establish provenance |
+| `schema_observed` | `table`, `sample_count`, path/type profile | preserve the real source shape |
 | `record` | `table`, `key`, arbitrary columns, optional `error` | create or update a row |
 | `metric` | `metric`, `value`, `increment` | update counters |
 | `checkpoint` | `checkpoint`, `value` | show durable progress |
@@ -408,20 +485,42 @@ chunks and immediately continue until caught up.
 
 ## Production Verification
 
-Prove the harness against real workflow behavior before the full dataset:
+Prove the harness against real workflow behavior before the full dataset.
 
-1. Run `observer-kit doctor .` and the emit/durability linter.
+During workflow mapping, record the selected verification branch IDs and their
+trigger reasons in `EXPLAIN.md`: `paid_provider`, `external_destination`,
+`long_running`, `schema_policy_quality`, and `iterative_comparison`. Carry that
+same selected set into the operator proposal and the active-branch evidence.
+
+Universal evidence for every workflow:
+
+1. Run CLI `doctor` or confirm the bundled files, then run the emit/durability
+   linter.
 2. Start the dashboard before a representative dry-run sample.
-3. Compare dashboard rows and counters with the raw JSONL.
-4. Compare each completed sample row with its durable result store.
-5. Force a failure after several saved items and resume the same lane.
-6. Start a second process on the same source and confirm lock refusal.
-7. Exercise pause or stop and confirm worker acknowledgement at a boundary.
-8. Reconcile external intents and receipts with destination state.
-9. Verify later enrichment updates the same rows and a comparison session opens
-   a separate dashboard view.
-10. Present writes, skips, errors, schema findings, spend, ceilings, and restart
-    evidence for explicit approval.
+3. Open the bounded `response_json` samples, compare their observed schema and
+   projection with the user-approved columns, and confirm credential redaction.
+4. Compare dashboard rows and scalar counters with the raw JSONL; confirm each
+   material outcome is represented and each slow phase spans its work with rows.
+5. Compare each completed sample row with its durable result store.
+6. Force a failure after several saved items and resume the same lane.
+7. Start a second process on the same source and confirm lock refusal.
+8. Present the sample dashboard and restart evidence for explicit approval.
+
+Active-branch evidence for the workflow's real effects:
+
+- **Paid provider or metered API (`paid_provider`):** verify spend and rate
+  ceilings, shared throttling, persisted provider units, and resume reuse.
+- **External destination mutation (`external_destination`):** for delivery
+  beyond the authoritative durable result store, reconcile intents and receipts
+  with destination state and exercise append-before-receipt recovery.
+- **Long-running supervised job (`long_running`):** exercise pause or stop and
+  confirm worker acknowledgement plus operator chat at a durable boundary.
+- **Schema, policy, or quality contract (`schema_policy_quality`):** exercise
+  measured gates and retain their pass, pause, or refusal evidence in the
+  ledger.
+- **Iterative enrichment or comparison (`iterative_comparison`):** verify
+  current-lane keys update the same rows and a comparison session opens a
+  separate dashboard view.
 
 ## Runtime Files And APIs
 
@@ -437,7 +536,8 @@ Core helpers:
 - identity and lifecycle: `input_snapshot`, `start_observed_run`,
   `acquire_lock`, `ledger`, `success`, `fail`;
 - rows and progress: `step`, `count`, `checkpoint`, `lineage`;
-- review and policy: `preview`, `validate`, `allow_write`, `gate`, `simulate`;
+- review and policy: `schema_sample`, `preview`, `validate`, `allow_write`,
+  `gate`, `simulate`;
 - delivery and recovery: `write_intent`, `write_receipt`, `reconcile`,
   `dead_letter`, `replay_candidates`;
 - operator input: `check_controls`, `read_chat`, `post_chat`,

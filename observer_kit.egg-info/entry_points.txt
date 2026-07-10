@@ -1,0 +1,3 @@
+[console_scripts]
+observer-kit = observer_kit.cli:main
+

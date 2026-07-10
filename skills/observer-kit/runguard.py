@@ -59,6 +59,11 @@ _held: dict[str, tuple[str, int]] = {}  # name -> (persistent lockfile path, fd)
 _ledgers: dict[str, str] = {}
 _step_sequences: dict[str, int] = {}
 _SAFE_COMPONENT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+_CREDENTIAL_FIELD = re.compile(
+    r'^(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|'
+    r'password|passwd|secret|client[_-]?secret|cookie|set[_-]?cookie)$',
+    re.IGNORECASE,
+)
 
 
 class RunPaused(RuntimeError):
@@ -138,6 +143,55 @@ def _iter_jsonl(path: str):
 def _canonical_hash(value: object) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), default=str)
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _redact_sample(value: object, sensitive_fields: set[str]) -> object:
+    """Copy a JSON-like sample while replacing credential-bearing fields."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            name = str(key)
+            if name.lower() in sensitive_fields or _CREDENTIAL_FIELD.fullmatch(name):
+                result[key] = '[REDACTED]'
+            else:
+                result[key] = _redact_sample(item, sensitive_fields)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_redact_sample(item, sensitive_fields) for item in value]
+    return value
+
+
+def _schema_profile(value: object) -> dict[str, list[str]]:
+    """Return a compact path-to-types profile for a representative JSON value."""
+    paths: dict[str, set[str]] = {}
+
+    def add(path: str, kind: str) -> None:
+        paths.setdefault(path, set()).add(kind)
+
+    def visit(item: object, path: str) -> None:
+        if item is None:
+            add(path, 'null')
+        elif isinstance(item, bool):
+            add(path, 'boolean')
+        elif isinstance(item, int):
+            add(path, 'integer')
+        elif isinstance(item, float):
+            add(path, 'number')
+        elif isinstance(item, str):
+            add(path, 'string')
+        elif isinstance(item, dict):
+            add(path, 'object')
+            for key, child in item.items():
+                visit(child, f'{path}.{key}')
+        elif isinstance(item, (list, tuple)):
+            add(path, 'array')
+            for child in item:
+                visit(child, f'{path}[]')
+        else:
+            add(path, type(item).__name__)
+
+    visit(value, '$')
+    return {path: sorted(kinds) for path, kinds in sorted(paths.items())}
 
 
 def _file_hash(path: str) -> str | None:
@@ -543,6 +597,8 @@ class ObservedRun:
         self.checkpoints: dict[str, object] = {}
         self._seen_unique: set[str] = set()
         self._seen_controls: set[str] = set()
+        self._schema_profiles: dict[str, dict[str, set[str]]] = {}
+        self._schema_samples: dict[str, int] = {}
         self.stop_requested = False
         self.closed = False
         acquire_lock(self.lock_key)
@@ -675,6 +731,38 @@ class ObservedRun:
             payload['estimates'] = dict(estimates)
         self._event('impact_preview', **payload)
         return payload
+
+    def schema_sample(self, table: str, key: object, response: object,
+                      raw_field: str = 'response_json',
+                      sensitive_fields: tuple[str, ...] | list[str] | set[str] = (),
+                      **fields) -> object:
+        """Expose one bounded API response body and its observed shape for review.
+
+        Common credential fields are redacted recursively. Add provider-specific
+        response fields through ``sensitive_fields``. Request bodies and headers
+        are separate API-client concerns. The returned value matches the response
+        JSON written to the sample row.
+        """
+        extra_sensitive = {str(name).lower() for name in sensitive_fields}
+        safe_response = _redact_sample(response, extra_sensitive)
+        observed = _schema_profile(safe_response)
+        profile = self._schema_profiles.setdefault(table, {})
+        for path, kinds in observed.items():
+            profile.setdefault(path, set()).update(kinds)
+        self._schema_samples[table] = self._schema_samples.get(table, 0) + 1
+        self._event(
+            'schema_observed', table=table,
+            sample_count=self._schema_samples[table],
+            paths={path: sorted(kinds) for path, kinds in sorted(profile.items())},
+        )
+        row = dict(fields)
+        row.pop('table', None)
+        row.pop('key', None)
+        row.setdefault('sample', True)
+        if raw_field:
+            row[raw_field] = safe_response
+        self._event('record', table=table, key=str(key), **row)
+        return safe_response
 
     def validate(self, record: dict, key: object, contract: dict,
                  table: str = 'records', on_error: str = 'pause') -> bool:

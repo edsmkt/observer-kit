@@ -30,6 +30,9 @@ Read the Observer Kit README from the first available location:
 Use it to learn the product promise, skill/CLI split, operator journey, and
 dashboard expectations.
 
+Run `observer-kit --help`. Choose the CLI helper path when it succeeds; choose
+the bundled-script path in `references/pattern.md` for a skill-only install.
+
 Choose the active branch and load its reference:
 
 - **Write or adapt a production workflow**: read
@@ -43,7 +46,7 @@ Choose the active branch and load its reference:
   [`references/build-guide.md`](references/build-guide.md), then run the full
   acceptance suite after the change.
 
-Read the target script and its configuration before designing the harness.
+Read the target script/config when present; for new work, inspect the source and destination contracts first.
 
 **Complete when:** you can state which branch is active, what the user expects
 to supervise, and which files define the implementation.
@@ -56,49 +59,64 @@ Trace the script from input to destination and record:
   export ID, or equivalent;
 - the stable key for each source entity and each derived entity;
 - every slow loop, pool, page, retry, provider call, and cache fill;
+- the observed response shape from a bounded read call and its credential fields;
 - every destination mutation and its confirmation signal;
 - the durable store that resume reads;
 - the spend, write, rate, policy, and quality ceilings;
 - the requested run lane: update the current view or create a separate view.
 
-Preserve the script's working business logic and CLI while placing the harness
-on these real execution paths.
+Select each verification branch whose trigger is present:
 
-**Complete when:** every spend and mutation belongs to a mapped loop, source,
-stable key, durable store, destination, and ceiling.
+- `paid_provider`: a metered, credit, quota, or account-rate-limited call;
+- `external_destination`: delivery beyond the authoritative durable result
+  store to a CRM, database, spreadsheet, shared file, webhook, or API;
+- `long_running`: a loop, pool, or page set whose duration supports operator
+  pause or stop;
+- `schema_policy_quality`: an explicit schema, policy, or quality threshold;
+- `iterative_comparison`: requested enrichment updates, retries, redos, or
+  comparison lanes.
+
+Record the selected branch IDs and trigger reasons in `EXPLAIN.md`, then carry
+that same list into the operator proposal and sample verification.
+
+Create new logic and CLI or preserve existing ones while wiring these paths for optimum operator visibility.
+
+**Complete when:** every spend and mutation has a mapped path and every selected
+verification branch has a recorded trigger reason.
 
 ## 3. Propose The Operator View
 
 Propose a compact dashboard shape before wiring records:
 
 - tables and stable keys;
-- source, transformation, reasoning, outcome, destination, and `error` fields;
-- the source table used for progress;
-- three to five headline metrics chosen for this workflow;
-- a representative dry-run sample size, usually 5 to 25 rows;
-- whether later enrichment updates these rows or opens a comparison lane.
+- source, transformation, reasoning, outcome, destination, and `error` fields,
+  plus the source table used for progress;
+- observed schema, projected columns, and a clickable `response_json` sample field;
+- three to five scalar headline metrics covering the material outcomes;
+- a stratified dry-run sample across planned, write, skip, hold, missing, and failure outcomes;
+- whether later enrichment updates these rows or opens a comparison lane;
+- the selected verification branch IDs and their trigger reasons.
 
-Invite the user to confirm or edit the proposal. Set `error` to a concise message
-for a row that needs human attention; a successful retry emits `error=''` with
-the updated row so the Attention view reflects current row state.
+Invite the user to inspect the sample JSON, choose columns, and edit the proposal.
+Set concise attention errors; healthy and expected outcomes emit `error=''`.
 
-**Complete when:** the user can picture the tables, columns, counters, sample,
-and lane before execution begins.
+**Complete when:** the user can picture the tables, columns, counters, sample, and lane.
 
 ## 4. Wire The Harness
 
 Use `start_observed_run()` around the real job and pass the actual `source=`,
 `dry_run`, `description`, `todo`, `progress_table`, and concise
-`summary_metrics`.
+`summary_metrics` whose keys become scalar terminal counters.
 
 Apply the production contracts from `references/pattern.md`:
 
 1. Acquire the source-derived lock before the first spend or mutation.
 2. Record the input snapshot, script/config identity, destination, and transform
    version in the manifest.
-3. Require `--dry-run` plus a sample limit and make `--full-run` intentional.
-4. Emit each entity with stable `table=` and `key=` values from the loop or
-   completion callback where its work lands.
+3. Use the first bounded read to call `run.schema_sample()` with the decoded real
+   response body; let `--dry-run --limit` stop the earliest query/page/batch.
+4. Emit every material outcome as a stable entity or phase row from every slow
+   discovery/read/transform/write loop; update the same keys and pair progress with rows.
 5. Use the durable boundary order: perform work, persist the real result, emit
    the row, then checkpoint the completed key or chunk.
 6. Wrap each external delivery with validation, policy checks, write intent,
@@ -108,22 +126,21 @@ Apply the production contracts from `references/pattern.md`:
 8. Pace shared provider accounts with `throttle()` and enforce hard spend/write
    ceilings in code.
 
-For a phase-batched pipeline, persist each finalized item or bounded chunk as
-soon as that phase produces authoritative output. Resume reads that same store
-and selects the remaining work.
+For a phase-batched pipeline, persist each finalized item or bounded chunk when
+that phase produces authoritative output; resume selects remaining work from it.
 
 When one bounded unit uses internal pagination, keep the accumulator scoped to
 that unit and persist it immediately after its final page, before the next unit
 begins. Startup replay may rebuild working maps from this durable store; that
 read restores completed work and preserves the existing checkpoint.
 
-**Complete when:** stopping the process one line before its final statement
-loses at most the active item or bounded chunk, and resume selects remaining
-work while preserving confirmed spend and writes.
+**Complete when:** dry-run work stops at its sample boundary; stopping one line
+before the final statement loses at most the active item or bounded chunk, and
+resume preserves confirmed spend and writes while selecting remaining work.
 
 ## 5. Prove The Sample
 
-Start the long-lived dashboard before the sample so the user sees rows arrive:
+With the CLI helper, start the dashboard before the sample so rows arrive live:
 
 ```bash
 observer-kit init .
@@ -137,31 +154,49 @@ Run the static emission/durability check from the skill directory:
 python3 references/lint_emit.py /absolute/path/to/workflow.py
 ```
 
-Exercise the real sample and verify all of these surfaces:
+Exercise the real sample and verify this universal minimum:
 
-- JSONL events and dashboard rows advance during every slow phase;
-- the durable result store advances with completed work;
+- each slow phase emits a record before its terminal event while rows and the durable store advance;
+- the bounded schema sample opens as full JSON and its projected columns match user review;
+- scalar headline counts reconcile with stratified write, skip, hold, missing, and failure rows;
+- the sample limit bounds the earliest query, page, batch, or provider loop;
 - stable keys update existing rows and retain earlier fields;
-- destination receipts match the real destination state;
 - a forced mid-sample failure resumes in the same lane from saved work;
 - a simultaneous start on the same source receives the duplicate-run warning;
-- pause or stop reaches a script checkpoint, records acknowledgement, and opens
-  a channel for operator context;
 - the dashboard remains usable while records arrive, including scroll position,
   filters, timeline, counters, and Attention rows.
 
-Summarize planned writes, skips, errors, schema findings, estimated spend, and
-the observed restart boundary.
+Use the branch list recorded in Step 2 and `EXPLAIN.md`. Verify every selected
+branch:
 
-**Complete when:** the linter exits zero, every verification above has direct
-evidence, and the user has reviewed the sample dashboard.
+- **Paid provider or metered API (`paid_provider`):** hard spend and rate
+  ceilings hold, shared throttles pace calls, and resume reuses persisted
+  provider units;
+- **External destination mutation (`external_destination`):** for delivery
+  beyond the authoritative durable result store, intents and receipts reconcile
+  with the real CRM, database, spreadsheet, shared file, webhook, or API state;
+- **Long-running supervised job (`long_running`):** pause or stop reaches a
+  script checkpoint, records acknowledgement, and opens a channel for operator
+  context;
+- **Schema, policy, or quality contract (`schema_policy_quality`):** measured
+  gates produce the expected pass, pause, or refusal evidence before delivery.
+- **Iterative enrichment or comparison (`iterative_comparison`):** current-lane
+  keys update existing rows, while a comparison lane opens a separate dashboard
+  view.
+
+Summarize the universal evidence and each active branch, including records,
+skips, errors, planned writes, schema findings, spend, ceilings, and the
+observed restart boundary.
+
+**Complete when:** the linter exits zero, every universal check and active
+branch has direct evidence, and the user has reviewed the sample dashboard.
 
 ## 6. Run After Explicit Approval
 
 Ask for explicit confirmation after presenting the sample summary. Begin the
 full dataset through the intentional full-run flag after approval.
 
-Keep one dashboard server attached to the state directory. Let
+Keep one dashboard server attached to the state directory. With the CLI, let
 `observer-kit run` attach to it and start the run-scoped watcher, or keep one
 all-run watcher for a long-lived project:
 
@@ -210,5 +245,6 @@ dashboard view.
 - `watch_chat.py`: dashboard-message transport for the active agent harness.
 - `EXPLAIN.md`: project-specific statement of intent shown to the operator.
 
-Run `observer-kit doctor .` after project setup. Run `observer-kit test` after
-changing Observer Kit's runtime, CLI, linter, watcher, or dashboard.
+With the CLI helper, run `observer-kit doctor .` after setup and
+`observer-kit test` after core changes. The bundled-script path runs the
+matching `test_*.py` files.

@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Lint an agent-written batch script for two observer-kit violations:
+"""Lint an agent-written batch script for common Observer Kit contract gaps:
 
     buffering all provider results in memory and emitting `record` ledger
     rows only in a final flush block (instead of as work lands).
 
     reporting progress while the actual result remains memory-only until a
     final write. A live dashboard is not a durable resume point.
+
+    reporting progress from a repeated slow phase while its record/table
+    surface stays empty until a terminal preview flush.
+
+    starting an observed run with no explicit summary_metrics selection, which
+    leaves useful terminal totals outside the intended headline surface.
 
 This defeats live dashboard visibility and loses everything if the process
 crashes mid-run. Run it on any script before the full run:
@@ -43,23 +49,54 @@ READ_DERIVATION_CALLS = {'load', 'loads', 'get', 'items', 'values', 'keys',
                          'strip', 'split', 'decode', 'copy'}
 
 
-def _is_ledger_record_call(node):
-    """Return True if `node` is a call that emits a 'record' ledger event."""
+def _is_ledger_event_call(node, event):
+    """Return True when `node` emits the requested dashboard event."""
     if not isinstance(node, ast.Call):
         return False
-    # ledger(scope, 'record', ...)
-    if isinstance(node.func, ast.Name) and node.func.id == 'ledger':
+    # ledger(...) and runguard.ledger(...)
+    is_ledger = (
+        isinstance(node.func, ast.Name) and node.func.id == 'ledger'
+    ) or (
+        isinstance(node.func, ast.Attribute) and node.func.attr in ('ledger', '_ledger')
+    )
+    if is_ledger:
         if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-            return node.args[1].value in RECORD_EVENTS
-    # run.step(..., event='record') or run.step('record', ...)
-    if isinstance(node.func, ast.Attribute) and node.func.attr in ('step', 'record'):
-        # check positional or keyword for 'record'
-        if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value in RECORD_EVENTS:
+            return node.args[1].value == event
+    if isinstance(node.func, ast.Attribute):
+        # ObservedRun.step() always emits stable record rows.
+        if event == 'record' and node.func.attr in ('step', 'record'):
             return True
-        for kw in node.keywords:
-            if kw.arg in ('event', 'table') and isinstance(kw.value, ast.Constant) and kw.value.value in RECORD_EVENTS:
-                return True
+        if event == 'progress' and node.func.attr == 'progress':
+            return True
+        if node.func.attr == 'step':
+            for kw in node.keywords:
+                if (kw.arg == 'event' and isinstance(kw.value, ast.Constant)
+                        and kw.value.value == event):
+                    return True
     return False
+
+
+def _is_ledger_record_call(node):
+    return _is_ledger_event_call(node, 'record')
+
+
+def _summary_metric_violations(tree):
+    """Find explicit run starts that omit the dashboard headline contract."""
+    violations = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        is_start = _called_name(node) == 'start_observed_run'
+        is_raw_start = _is_ledger_event_call(node, 'run_started')
+        if not (is_start or is_raw_start):
+            continue
+        # A **kwargs expansion may carry summary_metrics, so leave that shape to
+        # the behavioral sample instead of producing a speculative warning.
+        if any(keyword.arg is None for keyword in node.keywords):
+            continue
+        if not any(keyword.arg == 'summary_metrics' for keyword in node.keywords):
+            violations.append(('SUMMARY_METRICS_MISSING', node.lineno))
+    return violations
 
 
 def _loop_ranges_over_work(node, work_names):
@@ -100,7 +137,11 @@ def analyze(path):
 
     # Find the loop(s) that mutate a results container (the "work" loop)
     work_entries = _find_result_mutating_loops(tree, work_names, parents)
-    work_loops = [loop for loop, _buffers in work_entries]
+
+    # Progress is a companion surface. Repeated progress from a slow loop must
+    # advance at least one stable entity or phase row in that same loop path.
+    row_liveness_violations = _find_row_liveness_violations(tree)
+    summary_violations = _summary_metric_violations(tree)
 
     # A result held only in memory after a provider phase is neither resumable
     # nor durable, even if the script emits lively progress heartbeats. Require
@@ -112,22 +153,19 @@ def analyze(path):
     ]
 
     if not record_emit_sites:
-        return durability_violations
+        return durability_violations + row_liveness_violations + summary_violations
 
     # A record emit is VALID only if it is inside a work loop (the same loop that
     # mutates results), or inside a function called from a work loop.
     violations = []
     for fname, node in record_emit_sites:
-        if not work_loops:
-            # No buffering detected — emit-in-any-work-loop is the correct pattern.
-            if _emit_in_any_work_loop(node, tree, work_names):
-                continue
-        else:
-            if _emit_in_work_loop(node, tree, work_loops, work_names):
-                continue
+        # Buffer durability is checked per result-producing loop above. Record
+        # placement is local: any repeated item loop (or helper it calls) streams.
+        if _emit_in_any_work_loop(node, tree, work_names):
+            continue
         violations.append((fname, node.lineno))
 
-    return violations + durability_violations
+    return violations + durability_violations + row_liveness_violations + summary_violations
 
 
 def _enclosing_function(tree, node):
@@ -183,6 +221,45 @@ def _body_nodes(node):
                                 ast.Lambda, ast.ClassDef)):
             continue
         stack.extend(ast.iter_child_nodes(current))
+
+
+def _function_emits_event(fn, event, functions, seen=None):
+    seen = set(seen or ())
+    if fn.name in seen:
+        return False
+    seen.add(fn.name)
+    for node in _body_nodes(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        if _is_ledger_event_call(node, event):
+            return True
+        helper = functions.get(_called_name(node))
+        if helper and _function_emits_event(helper, event, functions, seen):
+            return True
+    return False
+
+
+def _loop_emits_event(loop, event, functions):
+    for node in _body_nodes(loop):
+        if not isinstance(node, ast.Call):
+            continue
+        if _is_ledger_event_call(node, event):
+            return True
+        helper = functions.get(_called_name(node))
+        if helper and _function_emits_event(helper, event, functions):
+            return True
+    return False
+
+
+def _find_row_liveness_violations(tree):
+    functions = _function_defs(tree)
+    return [
+        ('ROW_LIVENESS_MISSING', loop.lineno)
+        for loop in ast.walk(tree)
+        if isinstance(loop, LOOP_TYPES)
+        and _loop_emits_event(loop, 'progress', functions)
+        and not _loop_emits_event(loop, 'record', functions)
+    ]
 
 
 def _root_names(node):
@@ -422,30 +499,15 @@ def _result_buffers_mutated_in(loop, functions):
     return buffers
 
 
-def _emit_in_work_loop(node, tree, work_loops, work_names):
-    """Emit is valid if it is lexically inside a work loop, or inside a function
-    called from a work loop."""
-    for loop in work_loops:
+def _emit_in_any_work_loop(node, tree, _work_names):
+    """Without a detected buffer, any repeated loop is an incremental emit."""
+    for loop in [n for n in ast.walk(tree) if isinstance(n, LOOP_TYPES)]:
         if _node_in_loop_body(loop, node):
             return True
     fn = _enclosing_function(tree, node)
     if fn:
-        for loop in work_loops:
-            if _func_called_from_loop_body(loop, fn.name):
-                return True
-    return False
-
-
-def _emit_in_any_work_loop(node, tree, work_names):
-    """Emit is valid if it is lexically inside any loop that ranges over work
-    items (no buffering detected, so live emit from the work loop is correct)."""
-    for loop in [n for n in ast.walk(tree) if isinstance(n, LOOP_TYPES)]:
-        if _node_in_loop_body(loop, node) and _loop_ranges_over_work(loop, work_names):
-            return True
-    fn = _enclosing_function(tree, node)
-    if fn:
         for loop in [n for n in ast.walk(tree) if isinstance(n, LOOP_TYPES)]:
-            if _loop_ranges_over_work(loop, work_names) and _func_called_from_loop_body(loop, fn.name):
+            if _func_called_from_loop_body(loop, fn.name):
                 return True
     return False
 
@@ -564,8 +626,9 @@ def _helper_has_durable_write(fn, functions, seen=None):
 
 
 def _node_in_loop_body(loop, node):
+    iterator = getattr(loop, 'iter', None)
     for child in ast.iter_child_nodes(loop):
-        if child is loop.iter:
+        if child is iterator:
             continue
         for n in ast.walk(child):
             if n is node:
@@ -587,7 +650,7 @@ def _func_called_from_loop_body(loop, fname):
 
 def main():
     ap = argparse.ArgumentParser(
-        description='Lint for buffered output and missing durable work-loop writes')
+        description='Lint for buffered output, row liveness, headline summaries, and durable work-loop writes')
     ap.add_argument('script')
     args = ap.parse_args()
 
@@ -598,23 +661,48 @@ def main():
         sys.exit(2)
 
     if not violations:
-        print(f'OK - {args.script}: No common buffered-output violation detected.')
+        print(f'OK - {args.script}: No common buffered-output, row-liveness, summary-contract, or durability violation detected.')
         print('  Static analysis is heuristic; confirm the durable boundary with a forced crash/resume sample.')
         sys.exit(0)
 
-    print(f'VIOLATION in {args.script}: incremental observability or durability is missing.')
+    print(f'VIOLATION in {args.script}: an observability or durability contract is missing.')
     if any(kind == 'DURABILITY_MISSING' for kind, _ in violations):
         print('  DURABILITY MISSING: a results container is populated in a work loop,')
         print('  but no durable result write is visible there. Progress events do not')
         print('  protect paid work from a crash or make --resume skip it.')
-    if any(kind != 'DURABILITY_MISSING' for kind, _ in violations):
+    if any(kind == 'ROW_LIVENESS_MISSING' for kind, _ in violations):
+        print('  ROW LIVENESS MISSING: a repeated loop emits progress while its')
+        print('  record/table surface stays unchanged. A terminal preview dump leaves')
+        print('  the operator with an empty table during the slow phase.')
+    if any(kind == 'SUMMARY_METRICS_MISSING' for kind, _ in violations):
+        print('  SUMMARY METRICS MISSING: the run start has no explicit headline')
+        print('  metric selection, so useful terminal totals can remain outside the')
+        print('  dashboard summary strip.')
+    if any(kind not in ('DURABILITY_MISSING', 'ROW_LIVENESS_MISSING',
+                        'SUMMARY_METRICS_MISSING')
+           for kind, _ in violations):
         print('  RECORD EMIT MISSING: record ledger events are outside the work loop.')
     print()
-    print('  Fix: persist the result and emit its record in the same item loop or')
-    print('  completion callback, then checkpoint only after that durable boundary.')
+    if any(kind == 'DURABILITY_MISSING' for kind, _ in violations):
+        print('  Durability fix: persist the result and emit its record in the same item')
+        print('  loop or completion callback, then checkpoint after that boundary.')
+    if any(kind == 'ROW_LIVENESS_MISSING' for kind, _ in violations):
+        print('  Liveness fix: emit a stable entity or phase record from each progress')
+        print('  loop, then update that same table/key as later fields become known.')
+    if any(kind == 'SUMMARY_METRICS_MISSING' for kind, _ in violations):
+        print('  Summary fix: select three to five summary_metrics at run start and')
+        print('  emit matching scalar numeric fields on the terminal event.')
+    if any(kind not in ('DURABILITY_MISSING', 'ROW_LIVENESS_MISSING',
+                        'SUMMARY_METRICS_MISSING')
+           for kind, _ in violations):
+        print('  Record fix: emit each record from its item loop or completion callback.')
     print()
     for fname, lineno in violations:
-        if fname != 'DURABILITY_MISSING' and isinstance(lineno, int):
+        if fname == 'ROW_LIVENESS_MISSING':
+            print(f'  - progress loop at line {lineno} has no record-row path')
+        elif fname == 'SUMMARY_METRICS_MISSING':
+            print(f'  - run start at line {lineno} has no summary_metrics selection')
+        elif fname != 'DURABILITY_MISSING' and isinstance(lineno, int):
             print(f'  - record emit in {fname}() at line {lineno} is outside any work loop')
     print()
     print('  See SKILL.md > "4. Wire The Harness" and "5. Prove The Sample".')

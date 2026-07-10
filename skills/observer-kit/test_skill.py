@@ -17,6 +17,7 @@ SKILL = HERE / 'SKILL.md'
 PATTERN = HERE / 'references' / 'pattern.md'
 BUILD_GUIDE = HERE / 'references' / 'build-guide.md'
 LINTER = HERE / 'references' / 'lint_emit.py'
+EXPLAIN = HERE / 'EXPLAIN.md'
 
 
 def ok(name: str, condition: bool, detail: str = '') -> None:
@@ -46,6 +47,7 @@ print(f'Testing cold-start skill contract at {HERE}\n')
 
 skill = SKILL.read_text(encoding='utf-8')
 pattern = PATTERN.read_text(encoding='utf-8')
+explain = EXPLAIN.read_text(encoding='utf-8')
 metadata = (HERE / 'agents' / 'openai.yaml').read_text(encoding='utf-8')
 skill_words = ' '.join(skill.split())
 description_match = re.search(r'^description:\s*(.+)$', skill, re.MULTILINE)
@@ -66,7 +68,7 @@ ok('description covers workflow, operations, and core-maintenance branches',
        'writing, adapting, or running', 'run controls', 'maintaining Observer Kit')),
    description)
 
-required_paths = [PATTERN, BUILD_GUIDE, LINTER]
+required_paths = [PATTERN, BUILD_GUIDE, LINTER, EXPLAIN]
 ok('every bundled context pointer resolves', all(path.is_file() for path in required_paths),
    ', '.join(str(path) for path in required_paths))
 ok('README and production pattern have explicit purpose pointers',
@@ -82,9 +84,12 @@ negative_steering = re.compile(
 )
 skill_negations = negative_steering.findall(prose(skill))
 pattern_negations = negative_steering.findall(prose(pattern))
+explain_negations = negative_steering.findall(prose(explain))
 ok('skill uses positive steering', not skill_negations, str(skill_negations))
 ok('production reference uses positive steering', not pattern_negations,
    str(pattern_negations[:10]))
+ok('operator explainer template uses positive steering', not explain_negations,
+   str(explain_negations[:10]))
 
 legacy_terms = ('Per company', 'phone_found', 'email_found', 'bc_submitted',
                 'edit the SOURCES', 'company + name')
@@ -96,18 +101,105 @@ ok('production reference co-locates the critical runtime contracts',
        '## Source Identity And Run Lanes', '## Durable Boundaries And Resume',
        '## External Delivery', '## Controls, Chat, And Watchers',
        '## Production Verification')))
+ok('cold-start agents create new workflows or adapt unfamiliar scripts',
+   all(term in skill_words for term in (
+       'for new work, inspect the source and destination contracts first',
+       'Create new logic and CLI or preserve existing ones while wiring these paths for optimum operator visibility',
+       'observed schema, projected columns',
+       'Emit every material outcome as a stable entity or phase row',
+       'each slow phase emits a record before its terminal event')) and
+   'unfamiliar existing scripts after tracing their actual CLI and work paths'
+   in ' '.join(pattern.split()))
 
 prove_match = re.search(r'^## 5\. Prove The Sample\n(.*?)(?=^## 6\.)',
                         skill, re.MULTILINE | re.DOTALL)
 prove_section = prove_match.group(1) if prove_match else ''
 prove_words = ' '.join(prove_section.split())
+map_match = re.search(r'^## 2\. Map The Real Workflow\n(.*?)(?=^## 3\.)',
+                      skill, re.MULTILINE | re.DOTALL)
+map_section = map_match.group(1) if map_match else ''
+map_words = ' '.join(map_section.split())
+propose_match = re.search(r'^## 3\. Propose The Operator View\n(.*?)(?=^## 4\.)',
+                          skill, re.MULTILINE | re.DOTALL)
+propose_section = propose_match.group(1) if propose_match else ''
+propose_words = ' '.join(propose_section.split())
+wire_match = re.search(r'^## 4\. Wire The Harness\n(.*?)(?=^## 5\.)',
+                       skill, re.MULTILINE | re.DOTALL)
+wire_section = wire_match.group(1) if wire_match else ''
+wire_words = ' '.join(wire_section.split())
 pattern_words = ' '.join(pattern.split())
+branch_ids = (
+    'paid_provider', 'external_destination', 'long_running',
+    'schema_policy_quality', 'iterative_comparison',
+)
+explain_words = ' '.join(explain.split())
 ok('sample gate requires crash-resume proof beyond a green linter',
    'forced mid-sample failure resumes in the same lane from saved work' in prove_words and
    'linter exits zero' in prove_words and
    'direct evidence' in prove_words and
    'Treat its zero exit as one piece of evidence' in pattern_words and
    'confirm the real sink during the sample' in pattern_words)
+ok('sample work and row-surface liveness are explicit contracts',
+   'earliest query/page/batch' in wire_words and
+   'every slow discovery/read/transform/write loop' in wire_words and
+   'pair progress with rows' in wire_words and
+   'each slow phase emits a record before its terminal event' in prove_words and
+   'sample limit bounds the earliest query, page, batch, or provider loop' in prove_words and
+   'repeated progress loops have a stable record-row path' in pattern_words and
+   'Sample work limit' in explain_words)
+ok('bounded source discovery drives a reviewable table projection',
+   'observed response shape from a bounded read call' in map_words and
+   'clickable `response_json` sample field' in propose_words and
+   'run.schema_sample()' in wire_words and
+   'bounded schema sample opens as full JSON' in prove_words and
+   'cumulative `schema_observed` path/type profile' in pattern_words and
+   all(term in explain_words for term in (
+       'Bounded schema read', 'Observed schema', 'Raw response field',
+       'Projected columns')))
+ok('material outcomes have rows and scalar headline totals',
+   'scalar headline metrics covering the material outcomes' in propose_words and
+   'stratified dry-run sample across planned, write, skip, hold, missing, and failure outcomes' in propose_words and
+   'Emit every material outcome as a stable entity or phase row' in wire_words and
+   'scalar headline counts reconcile with stratified write, skip, hold, missing, and failure rows' in prove_words and
+   'Each selected key maps to a scalar numeric field' in pattern_words and
+   'Outcome coverage' in explain_words)
+ok('sample verification separates universal proof from active branches',
+   'verify this universal minimum' in prove_words and
+   'Verify every selected branch' in prove_words and
+   all(branch in prove_words for branch in (
+       'Paid provider or metered API', 'External destination mutation',
+       'Long-running supervised job', 'Schema, policy, or quality contract',
+       'Iterative enrichment or comparison')) and
+   all(branch in pattern_words for branch in (
+       'Paid provider or metered API', 'External destination mutation',
+       'Long-running supervised job', 'Schema, policy, or quality contract',
+       'Iterative enrichment or comparison')) and
+   'beyond the authoritative durable result store' in prove_words and
+   'beyond the authoritative durable result store' in pattern_words and
+   'every universal check and active branch has direct evidence' in prove_words and
+   'Universal evidence for every workflow' in pattern_words and
+   'Active-branch evidence' in pattern_words)
+ok('workflow map selects the branch set consumed by sample verification',
+   all(branch in map_words and branch in prove_words and branch in pattern_words
+       for branch in branch_ids) and
+   'trigger reasons in `EXPLAIN.md`' in map_words and
+   'branch list recorded in Step 2 and `EXPLAIN.md`' in prove_words and
+   'same selected set' in pattern_words and
+   'every selected verification branch has a recorded trigger reason' in map_words)
+ok('skill supports both CLI-helper and bundled-script launch paths',
+   'observer-kit --help' in skill and
+   'bundled-script path' in skill and
+   '## Helper Availability And Launch Paths' in pattern and
+   'python3 -m observer_kit --help' in pattern and
+   'run_dashboard.py .runguard --port 8484' in pattern and
+   'watch_chat.py <run-id> --state-dir .runguard --follow' in pattern)
+ok('operator explainer is generic and ready for branch selection',
+   all(branch in explain_words for branch in branch_ids) and
+   all(term in explain_words for term in (
+       'Stable source identity', 'Stable record key', 'Durable result store',
+       'Run lane', 'Resume boundary', 'Dashboard view')) and
+   all(term not in explain_words for term in (
+       'phone number', 'best-titled', 'provider 1', 'per company')))
 
 short_match = re.search(r'short_description:\s*"([^"]+)"', metadata)
 prompt_match = re.search(r'default_prompt:\s*"([^"]+)"', metadata)
@@ -115,7 +207,8 @@ short_description = short_match.group(1) if short_match else ''
 default_prompt = prompt_match.group(1) if prompt_match else ''
 ok('UI metadata matches the harness model',
    25 <= len(short_description) <= 64 and 'harness' in short_description.lower())
-ok('default prompt invokes the skill explicitly', '$observer-kit' in default_prompt)
+ok('default prompt invokes the skill for creation and adaptation',
+   '$observer-kit' in default_prompt and 'create or adapt' in default_prompt)
 
 with tempfile.TemporaryDirectory(prefix='observer-skill-example-') as tmp:
     root = Path(tmp)

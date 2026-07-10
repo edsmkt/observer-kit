@@ -468,12 +468,16 @@ tr:hover td:first-child{background:#232c36}
 /* drag handle on the right edge of each header cell to resize its column */
 .rz{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize}
 .rz:hover{background:#3a4a5e}
-/* double-click a cell → full content (for long descriptions) */
+/* click structured JSON or double-click any cell to inspect full content */
 #cellmodal{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);align-items:center;justify-content:center}
 #cellmodal.show{display:flex}
-#cellmodalbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;max-width:min(680px,90vw);max-height:80vh;overflow:auto}
+#cellmodalbox{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;width:min(760px,90vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden}
 #cellmodalhead{color:var(--info);font-size:12.5px;margin-bottom:8px}
-#cellmodalbody{white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.55}
+#cellmodalbody{white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.55;overflow:auto;min-height:0}
+#cellmodalbody.json{font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;color:#dbe9f7;tab-size:2}
+#cellmodalactions{flex:0 0 auto;text-align:right;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+.jsonOpen{display:inline-flex;align-items:center;gap:7px;max-width:100%;padding:0;border:0;background:transparent;color:var(--info);font:inherit;cursor:pointer}
+.jsonOpen:hover{text-decoration:underline}.jsonGlyph{font:12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim)}
 .pill{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12px}
 .pill.ok{background:#1d3a2b;color:var(--ok)}.pill.warn{background:#3a331d;color:var(--warn)}
 .pill.err{background:#3a221d;color:var(--err)}.pill.dim{background:#242e39;color:var(--dim)}
@@ -538,7 +542,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
   <div id=cellmodalbox>
     <div id=cellmodalhead></div>
     <div id=cellmodalbody></div>
-    <div style="text-align:right;margin-top:10px"><button class=chatbtn onclick="closeCellModal()">Close</button></div>
+    <div id=cellmodalactions><button class=chatbtn onclick="closeCellModal()">Close</button></div>
   </div>
 </div>
 <script>
@@ -673,14 +677,19 @@ function decorateChat(){
     cell.appendChild(b);
   });
 }
-// Command/Ctrl-click = chat · double click = expand full cell · drag header edge = resize column
+// Command/Ctrl-click = chat · JSON click/double click = expand · drag = resize
 content.addEventListener('click',ev=>{
   if(ev.target.closest('.rz'))return;
-  if(!ev.metaKey&&!ev.ctrlKey)return;
-  const cell=ev.target.closest('[data-col]'); if(!cell)return;
-  const a=anchorFor(cell); if(!a)return;
-  ev.preventDefault();
-  openChat(a,labelFor(cell),cell);
+  const cell=ev.target.closest('[data-col]');
+  if(ev.metaKey||ev.ctrlKey){
+    if(!cell)return;
+    const a=anchorFor(cell); if(!a)return;
+    ev.preventDefault();
+    openChat(a,labelFor(cell),cell);
+    return;
+  }
+  const trigger=ev.target.closest('.jsonOpen');
+  if(trigger&&cell){ev.preventDefault();openCellModal(cell,trigger);}
 });
 content.addEventListener('dblclick',ev=>{
   const cell=ev.target.closest('td[data-col]'); if(!cell)return;
@@ -701,11 +710,16 @@ document.addEventListener('mousemove',ev=>{
   colW[rz.col]=w;
 });
 document.addEventListener('mouseup',()=>{ if(rz){localStorage.setItem('observer_colw',JSON.stringify(colW)); rz=null;} });
-function openCellModal(cell){
+function openCellModal(cell,trigger=null){
   const clone=cell.cloneNode(true); const dot=clone.querySelector('.chatdot'); if(dot)dot.remove();
   const tr=cell.closest('tr'); const who=tr?(tr.dataset.name||tr.dataset.co||''):'';
   document.getElementById('cellmodalhead').textContent=(who?who+' · ':'')+cell.dataset.col;
-  document.getElementById('cellmodalbody').textContent=(clone.textContent||'').trim()||'(empty)';
+  const body=document.getElementById('cellmodalbody'), jsonTrigger=trigger||cell.querySelector('.jsonOpen');
+  body.classList.toggle('json',Boolean(jsonTrigger));
+  if(jsonTrigger){
+    try{body.textContent=JSON.stringify(JSON.parse(jsonTrigger.dataset.json),null,2);}
+    catch(e){body.textContent=jsonTrigger.dataset.json||'(empty)';}
+  }else body.textContent=(clone.textContent||'').trim()||'(empty)';
   document.getElementById('cellmodal').classList.add('show');
 }
 function closeCellModal(){document.getElementById('cellmodal').classList.remove('show');}
@@ -726,6 +740,11 @@ function clearResolvedError(row,event){
   }
 }
 function fmt(v){return v===true?'✓':v===false?'—':(v==null?'':(typeof v==='object'?JSON.stringify(v):String(v)));}
+function jsonCell(v){
+  const raw=JSON.stringify(v), count=Array.isArray(v)?v.length:Object.keys(v||{}).length;
+  const label=Array.isArray(v)?`${count} item${count===1?'':'s'}`:`${count} field${count===1?'':'s'}`;
+  return `<button type=button class=jsonOpen data-json="${esc(raw)}" title="Open full JSON"><span class=jsonGlyph>{ }</span><span>${label}</span></button>`;
+}
 function sidebarIcon(collapsed){
   const d=collapsed?'M10 8l4 4-4 4':'M14 8l-4 4 4 4';
   return `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9 5v14" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="${d}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -1008,10 +1027,11 @@ function renderRecordTable(groups, gorder, label){
   const visibleRows=rowKeys.map(k=>g.rows[k]);
   const cats=catColumns(allRows, cols);
   const gcell=(c,v,row)=>{
-    const disp=esc(fmt(v));
+    const structured=v!==null&&typeof v==='object';
+    const disp=structured?jsonCell(v):esc(fmt(v));
     const previous=row.__prev?.[c];
     // Status is the row's current lifecycle, while sink outcomes benefit from history.
-    const was=c!=='status'&&previous!==undefined&&previous!==v
+    const was=!structured&&c!=='status'&&previous!==undefined&&previous!==v
       ? ` <small style="color:var(--warn)">· was ${esc(fmt(previous))}</small>`:'';
     if(cats.has(c)&&v!=null&&v!=='')return `<span class="pill ${outcomeClass(v)||'dim'}">${disp}</span>${was}`;
     return disp+was;
@@ -1072,6 +1092,24 @@ function catColumns(rows, cols){
   return cats;
 }
 
+const TERMINAL_META=new Set(['ts','event','action','_file','attempt','status','dry_run','checkpoints','summary_metrics']);
+function numericSummaryEntries(value,prefix='',depth=0,out=[]){
+  if(!value||typeof value!=='object'||Array.isArray(value)||depth>3)return out;
+  for(const [key,item] of Object.entries(value)){
+    if(!prefix&&TERMINAL_META.has(key))continue;
+    const path=prefix?`${prefix} ${key}`:key;
+    if(typeof item==='number'&&Number.isFinite(item))out.push([path,item]);
+    else if(item&&typeof item==='object'&&!Array.isArray(item))numericSummaryEntries(item,path,depth+1,out);
+  }
+  return out;
+}
+function terminalSummaryText(event){
+  const numeric=numericSummaryEntries(event).slice(0,8);
+  if(numeric.length)return numeric.map(([key,value])=>`${esc(key.replaceAll('_',' '))}: ${esc(value)}`).join(', ');
+  return Object.entries(event).filter(([key])=>!TERMINAL_META.has(key))
+    .map(([key,value])=>`${esc(key.replaceAll('_',' '))}: ${esc(typeof value==='object'?JSON.stringify(value):value)}`).join(', ');
+}
+
 // Turn a raw event into {icon, text, cls, company, detail} — plain English.
 function humanize(e){
   const ev=e.action||e.event||'';
@@ -1079,7 +1117,7 @@ function humanize(e){
   const co=e.company?` at ${esc(e.company)}`:'';
   switch(ev){
     case 'run_started': return {icon:'▶️',cls:'info',text:`Run started — ${e.companies??e.todo??'?'} companies`+(e.worst_case_credits?`, spend ceiling ${e.worst_case_credits} credits`:'')};
-    case 'run_finished': return {icon:'🏁',cls:'info',text:`Run finished — `+Object.entries(e).filter(([k])=>!['ts','event','_file','attempt'].includes(k)).map(([k,v])=>`${esc(k.replaceAll('_',' '))}: ${esc(typeof v==='object'?JSON.stringify(v):v)}`).join(', ')};
+    case 'run_finished': return {icon:'🏁',cls:'info',text:`Run finished — ${terminalSummaryText(e)}`};
     case 'run_abandoned': return {icon:'⚠',cls:'err',text:`Run abandoned — ${esc(e.error||'process exited before closing the run')}`};
     case 'run_paused': return {icon:'Ⅱ',cls:'warn',text:`Run paused safely — ${esc(e.reason||'operator or quality gate request')}`};
     case 'run_manifest': return {icon:'•',cls:'dim',text:`Run manifest recorded${e.destination?` · destination ${esc(e.destination)}`:''}${e.transform_version?` · transform ${esc(e.transform_version)}`:''}`};
@@ -1097,6 +1135,7 @@ function humanize(e){
     case 'reconciliation': return {icon:'✓',cls:'info',text:`Reconciliation — ${e.written??0} written, ${e.pending??0} pending, ${e.dead_letters??0} replay candidate${e.dead_letters===1?'':'s'}`};
     case 'control_acknowledged': return {icon:'•',cls:'info',text:`Control acknowledged — ${esc(String(e.control||'').replaceAll('_',' '))}`};
     case 'simulation': return {icon:'◌',cls:'info',text:`Simulation fixture loaded — ${esc(e.records??0)} records`};
+    case 'schema_observed': return {icon:'{ }',cls:'info',text:`Observed ${Object.keys(e.paths||{}).length} JSON field paths for ${esc(e.table||'source data')} from ${esc(e.sample_count??1)} sample${e.sample_count===1?'':'s'}`};
     case 'progress': {
       const phase=esc(e.phase||'progress');
       const pct=(e.done!==undefined&&e.total)?` (${Math.round((Number(e.done)/Number(e.total))*100)}%)`:'';
@@ -1410,6 +1449,7 @@ function renderStats(){
     }
     if(statusCounts.running)chips.push(['running',statusCounts.running,'warn']);
     if(statusCounts.attention)chips.push(['needs attention',statusCounts.attention,'err']);
+    const summaryStart=chips.length;
     if(fin&&wantedSummary.length){
       for(const item of wantedSummary){
         const key=typeof item==='string'?item:item.key;
@@ -1421,12 +1461,9 @@ function renderStats(){
       for(const key of defaults){
         if(fin[key]!==undefined)pushMetric(key.replace(/_/g,' '),fin[key],key==='errors'?'err':'ok');
       }
-      if(!chips.length){
-        for(const [k,v] of Object.entries(fin)){
-          if(['ts','event','action','_file','status','dry_run','checkpoints','errors'].includes(k)||typeof v!=='number'||tables.includes(k))continue;
-          pushMetric(k.replace(/_/g,' '), v, outcomeClass(k)||'ok');
-          if(chips.length>=4)break;
-        }
+      if(chips.length===summaryStart){
+        for(const [path,value] of numericSummaryEntries(fin).slice(0,8))
+          pushMetric(path.replace(/_/g,' '),value,outcomeClass(path)||'ok');
       }
     }else{
       const primary=recTab&&recByTable[recTab]?recTab:tables[0];
@@ -1490,8 +1527,12 @@ function activityStrip(flatRecords, errors){
       if(parts.length>=3)break;
     }
     if(!parts.length){
+      for(const [path,value] of numericSummaryEntries(e).slice(0,3))
+        parts.push(`${value} ${path.replace(/_/g,' ')}`);
+    }
+    if(!parts.length){
       for(const [k,v] of Object.entries(e)){
-        if(['ts','event','action','_file','status','dry_run','checkpoints'].includes(k)||typeof v==='object')continue;
+        if(['ts','event','action','_file','attempt','status','dry_run','checkpoints','summary_metrics'].includes(k)||typeof v==='object')continue;
         parts.push(`${v} ${k.replace(/_/g,' ')}`);
         if(parts.length>=3)break;
       }
@@ -1514,11 +1555,15 @@ function activityStrip(flatRecords, errors){
   const progressRecords=primaryTable
     ? flatRecords.filter(({table})=>table===primaryTable)
     : flatRecords;
+  const completedProgress=progressRecords.filter(({row})=>{
+    const status=String(row.status||'').toLowerCase();
+    return !['running','queued','pending'].includes(status);
+  }).length;
   const measuredProgress=[...progressEvents()].reverse().find(e=>e.done!==undefined&&e.total!==undefined);
   const progress=started.todo
     ? (measuredProgress
         ? `${measuredProgress.done} / ${measuredProgress.total}`
-        : `${progressRecords.filter(({row})=>String(row.status||'').toLowerCase()==='done').length} / ${started.todo}`)
+        : `${completedProgress} / ${started.todo}`)
     : flatRecords.length
       ? `${flatRecords.length} records`
       : measuredProgress

@@ -49,7 +49,8 @@ def main():
 main()
 """)
 ok("buffered-then-flush is flagged (exit 1)", rc == 1, f"rc={rc}")
-ok("buffered-then-flush message names the violation", 'BUFFERED' in out or 'outside any work loop' in out, out[:120])
+ok("buffered-then-flush message names the violation",
+   'DURABILITY MISSING' in out or 'outside any work loop' in out, out[:160])
 
 # 2. Emit-inside-loop MUST pass (exit 0)
 rc, out, err = run_lint("""
@@ -187,7 +188,7 @@ ok("database upsert passes", rc == 0, f"rc={rc}; {out[:180]}")
 
 # 10. Success remains an explicitly heuristic result.
 ok("success message requires crash-resume proof",
-   'No common buffered-output violation detected' in out and 'crash/resume' in out,
+   'No common buffered-output' in out and 'row-liveness' in out and 'crash/resume' in out,
    out[:180])
 
 # 11. No work or record events at all MUST pass (not our concern)
@@ -283,6 +284,116 @@ def run(results_by_vat):
 """)
 ok("a provider iterator beneath a read loop still requires persistence",
    rc == 1 and 'DURABILITY MISSING' in out, f"rc={rc}; {out[:220]}")
+
+# 18. Progress during discovery cannot defer every preview row to a final dump.
+rc, out, err = run_lint("""
+import runguard
+def build_targets():
+    targets = {}
+    for page in source_pages:
+        for row in fetch_page(page):
+            targets[row['id']] = row
+        runguard.ledger('scope', 'progress', phase='discover', read=len(targets))
+    return targets
+def main():
+    targets = build_targets()
+    for row in targets.values():
+        runguard.ledger('scope', 'record', table='records', key=row['id'],
+                        destination='planned')
+    runguard.ledger('scope', 'run_finished')
+""")
+ok("progress with a terminal preview dump is flagged",
+   rc == 1, f"rc={rc}; {out[:240]}")
+ok("row-surface liveness failure is named",
+   'ROW LIVENESS MISSING' in out, out[:240])
+
+# 19. Qualified ledger calls pass when progress and stable rows advance together.
+rc, out, err = run_lint("""
+import runguard
+def run():
+    for page in source_pages:
+        for row in fetch_page(page):
+            runguard.ledger('scope', 'record', table='records', key=row['id'],
+                            destination='discovered')
+        runguard.ledger('scope', 'progress', phase='discover')
+""")
+ok("qualified ledger progress plus incremental rows passes",
+   rc == 0, f"rc={rc}; {out[:240]}")
+
+# 20. A slow phase can update one stable phase row while it discovers entities.
+rc, out, err = run_lint("""
+from runguard import ledger
+def run():
+    has_more = True
+    while has_more:
+        has_more = fetch_page()
+        ledger('scope', 'progress', phase='download')
+        ledger('scope', 'record', table='phases', key='download', status='running')
+""")
+ok("a stable phase row satisfies table liveness",
+   rc == 0, f"rc={rc}; {out[:240]}")
+
+# 21. Local helpers preserve the same progress-plus-record contract.
+rc, out, err = run_lint("""
+from runguard import ledger
+def emit_progress(done):
+    ledger('scope', 'progress', phase='discover', done=done)
+def emit_row(row):
+    ledger('scope', 'record', table='records', key=row['id'])
+def run():
+    for row in source_rows:
+        emit_progress(row['id'])
+        emit_row(row)
+""")
+ok("helper-mediated progress plus rows passes",
+   rc == 0, f"rc={rc}; {out[:240]}")
+
+# 22. A durable helper may emit its record through a stored ledger callback.
+rc, out, err = run_lint("""
+from runguard import ledger
+class Durable:
+    def __init__(self, callback):
+        self._ledger = callback
+    def persist(self, row):
+        append_checkpoint(row)
+        self._ledger('scope', 'record', table='provider_units', key=row['id'])
+def run(durable):
+    for row in source_rows:
+        fetch_paid_provider(row)
+        durable.persist(row)
+        ledger('scope', 'progress', phase='provider')
+""")
+ok("stored ledger callbacks preserve batch-row liveness",
+   rc == 0, f"rc={rc}; {out[:240]}")
+
+# 23. An explicit run start selects the small headline surface the operator sees.
+rc, out, err = run_lint("""
+from runguard import start_observed_run
+run = start_observed_run('backfill', source='crm:companies')
+run.success(companies={'write': 12, 'held': 2})
+""")
+ok("run start without headline metrics is flagged",
+   rc == 1 and 'SUMMARY METRICS MISSING' in out, f"rc={rc}; {out[:260]}")
+
+# 24. A declared summary contract remains valid for wrapper and raw-ledger starts.
+rc, out, err = run_lint("""
+from runguard import start_observed_run
+run = start_observed_run(
+    'backfill', source='crm:companies',
+    summary_metrics=['companies_to_write', 'companies_held'],
+)
+run.success(companies_to_write=12, companies_held=2)
+""")
+ok("wrapper summary metrics pass",
+   rc == 0, f"rc={rc}; {out[:240]}")
+
+rc, out, err = run_lint("""
+from runguard import ledger
+ledger('backfill', 'run_started', summary_metrics=['companies_to_write'])
+ledger('backfill', 'run_finished', companies_to_write=12)
+""")
+ok("raw-ledger summary metrics pass",
+   rc == 0, f"rc={rc}; {out[:240]}")
 
 print(f"\n{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)
