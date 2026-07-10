@@ -59,7 +59,7 @@ Trace the script from input to destination and record:
   export ID, or equivalent;
 - the stable key for each source entity and each derived entity;
 - every slow loop, pool, page, retry, provider call, and cache fill;
-- the observed response shape from a bounded read call and its credential fields;
+- the declared API/schema contract and observed response shape from bounded read calls;
 - every destination mutation and its confirmation signal;
 - the durable store that resume reads;
 - the spend, write, rate, policy, and quality ceilings;
@@ -91,13 +91,13 @@ Derive a compact initial dashboard shape from the mapped workflow and observed s
 - tables and stable keys;
 - source, transformation, reasoning, outcome, destination, and `error` fields,
   plus the source table used for progress;
-- observed schema, projected columns, and a clickable `response_json` sample field;
+- an observed field catalog with paths/types/examples, projected columns, and clickable `response_json`;
 - three to five scalar headline metrics covering the material outcomes;
 - a stratified dry-run sample across planned, write, skip, hold, missing, and failure outcomes;
 - whether later enrichment updates these rows or opens a comparison lane;
 - the selected verification branch IDs and their trigger reasons.
 
-A cold-start agent owns the initial proposal, then asks concise questions about decisions, fields, metrics, attention rules, limits, and lane; the user refines it from the sample.
+A cold-start agent owns the initial proposal, then asks concise questions about decisions, fields, response retention, metrics, attention rules, limits, and lane; the user refines it from the sample.
 Set concise attention errors; healthy and expected outcomes emit `error=''`.
 
 **Complete when:** the user can picture the view and every unresolved operator choice has an answer.
@@ -215,9 +215,9 @@ summary.
 
 ## 7. Adapt Or Recover Deliberately
 
-Use the same source, lane, table, and key to retry a failure, fix the script, or
-add enrichment to rows already shown. Append updated fields so the dashboard
-retains history and presents the latest row state.
+Use the same source, lane, table, and key for fixes or added columns. Project
+retained per-key responses into same-key updates; use a bounded re-read for
+fields absent from retained state so the dashboard preserves row history.
 
 Use a new stable session name or `--session auto` for a clean redo, comparison,
 or genuinely separate batch. Run parallel sources when their records are

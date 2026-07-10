@@ -106,7 +106,8 @@ ok('cold-start agents create new workflows or adapt unfamiliar scripts',
        'for new work, inspect the source and destination contracts first',
        'Create new logic and CLI or preserve existing ones while wiring these paths for optimum operator visibility',
        'A cold-start agent owns the initial proposal, then asks concise questions',
-       'observed schema, projected columns',
+       'an observed field catalog with paths/types/examples',
+       'observed field catalog with paths/types/examples, projected columns',
        'Emit every material outcome as a stable entity or phase row',
        'each slow phase emits a record before its terminal event')) and
    all(term in ' '.join(pattern.split()) for term in (
@@ -115,7 +116,7 @@ ok('cold-start agents create new workflows or adapt unfamiliar scripts',
        'A cold-start agent produces the complete initial projection from mapped evidence')))
 ok('operator questions refine evidence-backed defaults',
    all(term in skill_words for term in (
-       'decisions, fields, metrics, attention rules, limits, and lane',
+       'decisions, fields, response retention, metrics, attention rules, limits, and lane',
        'every unresolved operator choice has an answer')) and
    all(term in ' '.join(pattern.split()) for term in (
        'Ask two to five concise questions after presenting that recommendation',
@@ -124,6 +125,17 @@ ok('operator questions refine evidence-backed defaults',
        "Record the user's answers")) and
    all(term in ' '.join(explain.split()) for term in (
        'Operator decision', 'Attention or pause rules')))
+ok('field catalogs and retained responses support later columns',
+   all(term in skill_words for term in (
+       'Project retained per-key responses into same-key updates',
+       'use a bounded re-read for fields absent from retained state')) and
+   all(term in ' '.join(pattern.split()) for term in (
+       'Build an observed field catalog from `schema_observed`',
+       'representative value from the response samples',
+       'Sample-only retention', 'Governed response retention',
+       'Later columns re-project from that store with zero additional API spend',
+       'append a `record` event with the same table and key')) and
+   'Response retention' in ' '.join(explain.split()))
 
 prove_match = re.search(r'^## 5\. Prove The Sample\n(.*?)(?=^## 6\.)',
                         skill, re.MULTILINE | re.DOTALL)
@@ -162,14 +174,22 @@ ok('sample work and row-surface liveness are explicit contracts',
    'repeated progress loops have a stable record-row path' in pattern_words and
    'Sample work limit' in explain_words)
 ok('bounded source discovery drives a reviewable table projection',
-   'observed response shape from a bounded read call' in map_words and
-   'clickable `response_json` sample field' in propose_words and
+   'declared API/schema contract and observed response shape from bounded read calls' in map_words and
+   'clickable `response_json`' in propose_words and
    'run.schema_sample()' in wire_words and
    'bounded schema sample opens as full JSON' in prove_words and
    'cumulative `schema_observed` path/type profile' in pattern_words and
    all(term in explain_words for term in (
        'Bounded schema read', 'Observed schema', 'Raw response field',
        'Projected columns')))
+ok('response discovery triangulates code, declared schemas, and live probes',
+   all(term in pattern_words for term in (
+       "workflow's client code, tests, fixtures, cached responses",
+       'OpenAPI', 'GraphQL introspection', 'CRM property metadata',
+       'Execute bounded read-only probes through the exact production client and query shape',
+       'Compare declared and observed envelopes, paths, types, nulls, optional fields',
+       'Metered probes belong to the `paid_provider` branch')) and
+   'Response evidence' in explain_words)
 ok('material outcomes have rows and scalar headline totals',
    'scalar headline metrics covering the material outcomes' in propose_words and
    'stratified dry-run sample across planned, write, skip, hold, missing, and failure outcomes' in propose_words and

@@ -168,6 +168,22 @@ approval contracts.
 The dashboard is workflow-specific. Treat Observer Kit examples as illustrations
 and derive tables from the user's actual entities, effects, and review needs.
 
+Discover response fields from multiple evidence surfaces in this order:
+
+1. Inspect the workflow's client code, tests, fixtures, cached responses, query,
+   API version, selected properties, pagination, and account permissions.
+2. Read the authoritative machine-readable schema when available: OpenAPI,
+   GraphQL introspection, CRM property metadata, database `information_schema`,
+   SDK types, or the provider's official API documentation.
+3. Execute bounded read-only probes through the exact production client and query
+   shape, usually one to five representative entities or the earliest limited page.
+4. Compare declared and observed envelopes, paths, types, nulls, optional fields,
+   pagination, empty results, and error shapes; record material drift for review.
+
+Metered probes belong to the `paid_provider` branch and its sample ceiling. When
+live access is unavailable, build a provisional catalog from governed fixtures or
+a user-supplied sanitized response and label its evidence source in `EXPLAIN.md`.
+
 For an API, database, CRM, or other remote source, begin the dry run with one
 bounded read that reaches the real endpoint and returns representative entities.
 Capture each selected entity with the wrapper:
@@ -188,6 +204,12 @@ become `[REDACTED]`; `sensitive_fields` adds provider-specific names. Use one
 entity per sample row. Governed or very large responses stay in their governed
 store and use a small representative object plus `payload_ref` in the ledger.
 
+Build an observed field catalog from `schema_observed`: JSON path, observed type,
+and a representative value from the response samples. Present this catalog with
+the recommended projection so the user can choose fields by name. Conditional
+API fields expand the catalog through stratified samples or a provider schema
+endpoint when available.
+
 A cold-start agent produces the complete initial projection from mapped evidence
 and the user's objective. Present it beside raw samples; the user refines it
 through the JSON cell, a column header, or run chat before full execution.
@@ -197,6 +219,7 @@ questions whose answers change the workflow or operator view:
 
 - What decision should the sample help the user make before full execution?
 - Which entities, response fields, reasoning, and headline metrics must stay visible?
+- Should full responses use sample-only retention or a governed per-key archive for later columns?
 - Which outcomes belong in Attention or should pause further work?
 - What spend, write, quality, and rate limits apply, and what proves destination success?
 - Should later enrichment update this lane or open a comparison lane?
@@ -242,6 +265,24 @@ Advance each selected key with `run.count()` during work; it maps to a scalar
 numeric field on the terminal event. Emit additional counters for audit value while
 keeping the headline strip compact. Reconcile each material outcome counter with
 the folded record rows during the sample.
+
+## Response Retention And Later Columns
+
+The JSONL contains ledger events, projected row fields, and explicitly emitted
+`response_json` samples. Choose response retention with the user before full
+execution:
+
+- **Sample-only retention:** keep bounded response samples in the ledger. Later
+  columns use already-emitted fields or a bounded source re-read/backfill.
+- **Governed response retention:** persist each decoded response by stable key in
+  the durable result store before checkpointing and emit its `payload_ref`.
+  Later columns re-project from that store with zero additional API spend.
+
+To add a column, read the retained response or bounded re-read result, extract
+the requested field, and append a `record` event with the same table and key.
+The dashboard adds the column, updates existing rows in place, and retains prior
+history. A newly requested paid enrichment follows a new bounded sample and its
+active verification branches before broader execution.
 
 ## Durable Boundaries And Resume
 
