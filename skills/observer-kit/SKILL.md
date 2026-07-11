@@ -10,19 +10,17 @@ Pi, Command Code, Goose, or other agent session remains the brain. The skill
 supplies judgment, the CLI supplies repeatable plumbing, the script performs the
 work, and the watcher carries operator messages back to the active session.
 
-Build every run around two separate guarantees:
+Build every run around two guarantees:
 
-- **Liveness**: JSONL events advance while work happens, so the dashboard stays
-  current.
-- **Durability**: completed results reach a re-readable sink at a durable
-  boundary, so a restart continues from saved work. Ledger rows, write receipts,
-  controls, and throttle claims are fsync'd after append; resume trusts that
-  disk boundary, not process memory.
+- **Liveness**: JSONL events advance while work happens so the dashboard stays current.
+- **Durability**: completed results reach a re-readable sink at a durable boundary so
+  a restart continues from saved work. Ledger rows, write receipts, controls, and
+  throttle claims are fsync'd after append; resume trusts that disk boundary over
+  process memory.
 
-Dry-run honesty depends on routing every external mutation through
-`write_intent` / `write_receipt` (and optional `validate` / `allow_write`).
-Comparison or redo lanes use `RUNGUARD_SESSION` for a separate ledger **and**
-lock so they do not block each other on the same source.
+Route every external mutation through `write_intent` / `write_receipt` (and optional
+`validate` / `allow_write`) for dry-run honesty. Use `RUNGUARD_SESSION` for a separate
+ledger **and** lock so comparison or redo lanes stay independent on the same source.
 
 ## 1. Load The Right Context
 
@@ -30,8 +28,8 @@ Resolve relative paths from the directory containing this `SKILL.md`.
 
 Read the Observer Kit README from the repository checkout
 [`../../README.md`](../../README.md) or the
-[public repository](https://github.com/edsmkt/observer-kit/blob/main/README.md).
-Use it to learn the product promise, skill/CLI split, operator journey, and dashboard expectations.
+[public repository](https://github.com/edsmkt/observer-kit/blob/main/README.md)
+for the product promise, skill/CLI split, operator journey, and dashboard expectations.
 
 Establish a verified CLI command prefix before project setup. Probe
 `observer-kit --help`, then `python3 -m observer_kit --help`. When both probes
@@ -133,11 +131,9 @@ Apply the production contracts from `references/pattern.md`:
 
 For a phase-batched pipeline, persist each finalized item or bounded chunk when
 that phase produces authoritative output; resume selects remaining work from it.
-
 When one bounded unit uses internal pagination, keep the accumulator scoped to
 that unit and persist it immediately after its final page, before the next unit
-begins. Startup replay may rebuild working maps from this durable store; that
-read restores completed work and preserves the existing checkpoint.
+begins. Startup replay may rebuild working maps from this durable store.
 
 **Complete when:** dry-run work stops at its sample boundary; stopping one line
 before the final statement loses at most the active item or bounded chunk, and
@@ -202,27 +198,22 @@ branch has direct evidence, and the user has reviewed the sample dashboard.
 Ask for explicit confirmation after presenting the sample summary. Begin the
 full dataset through the intentional full-run flag after approval.
 
-Keep one dashboard server attached to the state directory. By default, `observer-kit run` creates or reuses one run-scoped watcher; different run IDs stay independent. Choose one all-run watcher for a single long-lived project session:
+Keep one dashboard server attached to the state directory. By default,
+`observer-kit run` creates or reuses one run-scoped watcher; different run IDs
+stay independent. Choose one all-run watcher for a single long-lived project session:
 
 ```bash
 observer-kit watch .runguard --all --follow
 observer-kit run --state-dir .runguard -- python3 workflow.py --full-run
 ```
 
-For interactive dashboard chat (operator note → agent reply), use the AXI-style
-poll loop so the UI shows **listening** while you wait:
+For interactive dashboard chat, use the AXI-style poll loop so the UI shows
+**listening** while you wait (`poll` → note → `reply` → `poll` again). Watcher
+ownership refuses overlapping bridges; parent-owned watchers exit with their CLI
+process. Use `observer-kit watch .runguard --status` for inspection.
 
-```bash
-observer-kit poll .runguard --run runguard:<lane>.jsonl
-observer-kit reply .runguard --run runguard:<lane>.jsonl --text "…" --resolved
-observer-kit poll .runguard --run runguard:<lane>.jsonl
-```
-
-Watcher ownership refuses overlapping bridges and parent-owned watchers exit with their CLI process. Use `observer-kit watch .runguard --status` for inspection.
-
-Treat watcher/poll output as transport into the current agent session. Inspect the
-script, JSONL, durable sink, and destination before replying or changing the
-run.
+Treat watcher/poll output as transport into the current agent session. Inspect
+the script, JSONL, durable sink, and destination before replying or changing the run.
 
 **Complete when:** the full run has an explicit operator approval, live
 monitoring, a terminal ledger event, reconciled receipts, and a concise outcome
@@ -251,13 +242,9 @@ dashboard view.
 - [`references/pattern.md`](references/pattern.md): production integration and
   operation contract; read in full for workflow design and adaptation.
 - [`references/lint_emit.py`](references/lint_emit.py): static check for final
-  flushes and progress paired with memory-buffered results; run before every
-  full dataset.
-- `runguard.py`: vendored runtime used by the workflow script.
-- `run_dashboard.py`: localhost dashboard server for one state directory.
-- `watch_chat.py`: dashboard-message transport for the active agent harness.
+  flushes and progress paired with memory-buffered results; run before every full dataset.
+- `runguard.py`, `run_dashboard.py`, `watch_chat.py`: vendored runtime, localhost
+  dashboard, and chat transport for the active agent harness.
 - `EXPLAIN.md`: project-specific statement of intent shown to the operator.
 
-With the CLI helper, run `observer-kit doctor .` after setup and
-`observer-kit test` after core changes. The bundled-script path runs the
-matching `test_*.py` files.
+With the CLI helper, run `observer-kit doctor .` after setup and `observer-kit test` after core changes. The bundled-script path runs the matching `test_*.py` files.

@@ -365,11 +365,10 @@ of evidence and confirm the real sink during the sample.
 ## External Delivery
 
 Wrap every CRM, database, spreadsheet, file, webhook, or API mutation in an
-observed delivery boundary. Dry-run is only honest when mutations go through
-this path: `write_intent` in dry mode emits a planned preview and never claims
-the receipt registry; `write_receipt` on a dry ticket stays on the preview
-surface. Nodes that write outside these APIs can still mutate during a dry run
-— treat that as a script bug, not a harness guarantee.
+observed delivery boundary. Dry-run honesty depends on this path:
+`write_intent` in dry mode emits a planned preview and leaves the receipt
+registry unclaimed; `write_receipt` on a dry ticket stays on the preview
+surface. Route every external mutation through these APIs so dry runs stay review-only.
 
 ```python
 CONTRACT = {
