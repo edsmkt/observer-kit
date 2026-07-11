@@ -320,7 +320,7 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     ok("live data updates preserve the operator's table position",
        'function captureTableScroll()' in DASHBOARD_SOURCE and 'function restoreTableScroll(state)' in DASHBOARD_SOURCE and
        '_tableScrollMem' in DASHBOARD_SOURCE and '_scrollRestoreGen' in DASHBOARD_SOURCE and
-       'do not clobber the operator viewport' in DASHBOARD_SOURCE and
+       '_stickyViewport' in DASHBOARD_SOURCE and
        'content.replaceChildren(shell);' in DASHBOARD_SOURCE and
        'restoreTableScroll(savedScroll);' in DASHBOARD_SOURCE and
        'if(html!==null){' in DASHBOARD_SOURCE)
@@ -437,7 +437,7 @@ ok("record window keeps continuous-lane business history across modes",
 ok("live table rebuilds preserve operator scroll position",
    '_tableScrollMem' in dashboard.DASHBOARD_JS and
    '_scrollRestoreGen' in dashboard.DASHBOARD_JS and
-   'do not clobber the operator viewport' in dashboard.DASHBOARD_JS and
+   '_stickyViewport' in dashboard.DASHBOARD_JS and
    'overflow-anchor:none' in open(RUN_DASHBOARD, encoding='utf-8').read())
 
 print(f"\n{passed} passed, {failed} failed")
