@@ -127,6 +127,20 @@ Choose lanes by intent:
   source, session, table, and stable keys. New record events update those rows.
 - **Clean comparison, redo, or separate batch**: set a new stable
   `RUNGUARD_SESSION`, pass `--session <name>`, or use `--session auto`.
+  Session lanes get **both** a separate ledger file and a separate source lock,
+  so two comparison runs on the same source can proceed in parallel.
+
+### Ledger durability
+
+Every ledger row, operator control, and write-receipt registry append is
+written with `O_APPEND` and then `os.fsync`'d. The source lock file is also
+fsynced. Treat "the call returned" as "the durable boundary is on disk" for
+crash/resume decisions. Throttle schedule claims are fsynced the same way so a
+restart cannot burst past `per_second`.
+
+If a process dies after a destination mutation but before `write_receipt`,
+resume raises `PendingWrite` rather than guessing — reconcile the destination
+and append the matching receipt before continuing.
 
 ## Minimal Wrapper
 
@@ -351,7 +365,11 @@ of evidence and confirm the real sink during the sample.
 ## External Delivery
 
 Wrap every CRM, database, spreadsheet, file, webhook, or API mutation in an
-observed delivery boundary:
+observed delivery boundary. Dry-run is only honest when mutations go through
+this path: `write_intent` in dry mode emits a planned preview and never claims
+the receipt registry; `write_receipt` on a dry ticket stays on the preview
+surface. Nodes that write outside these APIs can still mutate during a dry run
+— treat that as a script bug, not a harness guarantee.
 
 ```python
 CONTRACT = {
@@ -461,11 +479,16 @@ Call `run.check_controls()` before starting the next item and
 `run.check_controls(after_record=True)` after a durable item boundary:
 
 - `pause` closes the attempt at the next check and emits `run_paused`.
-- `stop_after_record` waits for the next `after_record=True` check.
-- `approve_full_run` is returned to the script or harness as an operator signal.
+- `stop_after_record` waits for the next `after_record=True` check. If the
+  process dies after the stop is acknowledged but before that pause, the next
+  attempt on the same lane stays armed until a stop pause or successful finish.
+- `approve_full_run` stays pending and is returned on every check while unacked.
+  Item-loop `check_controls()` leaves approval for the harness; when the harness
+  acts on it, call `run.acknowledge_control(control)` so a sample keeps the
+  operator's full-run signal until deliberate acceptance.
 
-Each applied control emits `control_acknowledged`, so recovered processes retain
-one-shot control state.
+Applied pause/stop controls emit `control_acknowledged`. Approval is
+acknowledged only through `acknowledge_control`.
 
 Default to run-scoped ownership so separate agent sessions and run IDs remain
 independent:
@@ -477,7 +500,21 @@ observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 
 
 `observer-kit run` creates or reuses one watcher for that run. Different run IDs
 may own independent watchers. A single long-lived project session may choose
-`observer-kit watch .runguard --all --follow`; watcher ownership refuses overlap
+`observer-kit watch .runguard --all --follow` for continuous harness bridges.
+For the AXI-style agent respond loop (Lavish-like), leave a long-poll running
+so the dashboard shows **listening** and wakes the agent when a note lands:
+
+```bash
+observer-kit poll .runguard --run runguard:<lane>.jsonl
+# …operator sends a dashboard note…
+# poll prints OBSERVER_CHAT_EVENT, marks responding, exits
+observer-kit reply .runguard --run runguard:<lane>.jsonl --text "…" --resolved
+observer-kit poll .runguard --run runguard:<lane>.jsonl   # listen again
+```
+
+`poll --reply "…"` posts an agent message first (Lavish `--agent-reply`), then
+listens. Notes stay durable if the poll times out — re-run it. Watcher ownership
+refuses overlap
 with run-scoped bridges. Parent-owned watcher children exit with their CLI
 process, and `observer-kit watch .runguard --status` lists current ownership.
 

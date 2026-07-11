@@ -263,5 +263,222 @@ print('NO-COLLISION')
 ok("sanitized scope names keep a collision-resistant digest", rc17 == 0 and 'NO-COLLISION' in out17,
    f"rc={rc17} err={err17.strip()[:80]}")
 
+# ---- 18. Missing then created path keeps one source scope ----
+pending = os.path.join(STATE, 'pending-source.csv')
+if os.path.exists(pending):
+    os.remove(pending)
+rc18, out18, err18 = child("""
+import runguard, os
+p = %r
+if os.path.exists(p):
+    os.remove(p)
+before = runguard.source_scope('load', p)
+open(p, 'w').write('id\\n1\\n')
+after = runguard.source_scope('load', p)
+assert before == after, (before, after)
+print('STABLE-PATH')
+""" % pending)
+ok("source path scope stays stable when the file is created later",
+   rc18 == 0 and 'STABLE-PATH' in out18, f"rc={rc18} err={err18.strip()[:120]}")
+
+# ---- 19. Rapid ledger stamps stay ordered and unique ----
+rc19, out19, err19 = child("""
+import runguard, json, os
+runguard.ledger('ts-burst', 'run_started')
+for i in range(30):
+    runguard.ledger('ts-burst', 'record', table='t', key=str(i), n=i)
+path = runguard._lane_path('ts-burst')
+rows = [json.loads(line) for line in open(path) if line.strip()]
+stamps = [row['ts'] for row in rows]
+assert len(stamps) == len(set(stamps)), stamps
+assert stamps == sorted(stamps), stamps
+assert all('.' in ts for ts in stamps)
+print('TS-OK')
+""")
+ok("ledger timestamps are unique and ordered under rapid emit",
+   rc19 == 0 and 'TS-OK' in out19, f"rc={rc19} err={err19.strip()[:120]}")
+
+# ---- 20. Far-future throttle slots are clamped instead of hanging pipelines ----
+rc20, out20, err20 = child("""
+import runguard, os, time
+path = runguard._state_path('stuck-api', '.throttle', 'resource')
+open(path, 'w').write(str(time.time() + 3600))
+start = time.time()
+runguard.throttle('stuck-api', 10)
+elapsed = time.time() - start
+assert elapsed < 2.0, elapsed
+print('THROTTLE-CLAMPED')
+""")
+ok("corrupt far-future throttle grants are clamped",
+   rc20 == 0 and 'THROTTLE-CLAMPED' in out20, f"rc={rc20} err={err20.strip()[:120]}")
+
+# ---- 21. RunPaused inside step does not emit failed/dead_letter ----
+rc21, out21, err21 = child("""
+import runguard, json
+run = runguard.start_observed_run('pause-step', source='pause-step', dry_run=True)
+runguard.post_control(run.run_id, 'pause')
+try:
+    with run.step('work', table='records', key='row-1'):
+        run.check_controls()
+except runguard.RunPaused:
+    pass
+rows = [json.loads(line) for line in open(runguard._lane_path(run.scope)) if line.strip()]
+assert any(r.get('event') == 'run_paused' for r in rows)
+assert any(r.get('event') == 'record' and r.get('key') == 'row-1' and r.get('status') == 'paused'
+           for r in rows)
+assert not any(r.get('event') == 'dead_letter' for r in rows)
+assert not any(r.get('event') == 'record' and r.get('key') == 'row-1' and r.get('status') == 'failed'
+               for r in rows)
+print('PAUSE-STEP-OK')
+""")
+ok("RunPaused inside step marks the row paused without dead-letter",
+   rc21 == 0 and 'PAUSE-STEP-OK' in out21, f"rc={rc21} err={err21.strip()[:160]}")
+
+# ---- 22. Non-finite throttle values do not disable pacing forever ----
+rc22, out22, err22 = child("""
+import runguard, os, time, math
+path = runguard._state_path('nan-api', '.throttle', 'resource')
+open(path, 'w').write('nan')
+start = time.time()
+runguard.throttle('nan-api', 20)
+# First call should heal the file to a finite grant.
+raw = open(path).read().strip()
+assert math.isfinite(float(raw)), raw
+# Two paced calls at 20/s should still take a little time, not free-spin forever broken.
+runguard.throttle('nan-api', 20)
+runguard.throttle('nan-api', 20)
+assert time.time() - start < 2.0
+print('NAN-THROTTLE-OK')
+""")
+ok("non-finite throttle slots are rejected and pacing recovers",
+   rc22 == 0 and 'NAN-THROTTLE-OK' in out22, f"rc={rc22} err={err22.strip()[:160]}")
+
+# ---- 23. SIGTERM records run_abandoned instead of a silent hang ----
+rc23, out23, err23 = child("""
+import os, signal, time, json, runguard
+run = runguard.start_observed_run('sigterm-demo', source='sig-src', dry_run=True)
+path = runguard._lane_path(run.scope)
+open(os.environ['RUNGUARD_STATE_DIR'] + '/sig.path', 'w').write(path)
+os.kill(os.getpid(), signal.SIGTERM)
+time.sleep(2)
+print('STILL-ALIVE')
+""")
+# Child may exit via signal; read the ledger path it left behind.
+sig_path_file = os.path.join(STATE, 'sig.path')
+sig_ok = False
+sig_detail = f'rc={rc23} out={out23!r} err={err23.strip()[:120]}'
+if os.path.isfile(sig_path_file):
+    ledger_path = open(sig_path_file).read().strip()
+    if os.path.isfile(ledger_path):
+        events = [json.loads(line) for line in open(ledger_path) if line.strip()]
+        sig_ok = any(e.get('event') == 'run_abandoned' for e in events) and rc23 != 0
+        sig_detail = f'rc={rc23} events={[e.get("event") for e in events]}'
+ok("SIGTERM abandons the open run with a terminal ledger event", sig_ok, sig_detail)
+
+# ---- 24. Ledger/receipt appends fsync (durability contract) ----
+rc24, out24, err24 = child("""
+import runguard
+fsync_calls = []
+_real = runguard.os.fsync
+def tracking(fd):
+    fsync_calls.append(fd)
+    return _real(fd)
+runguard.os.fsync = tracking
+try:
+    before = len(fsync_calls)
+    runguard.ledger('fsync-scope', 'run_started', note='durability')
+    after_ledger = len(fsync_calls)
+    runguard.throttle('fsync-api', 1000)
+    after_throttle = len(fsync_calls)
+finally:
+    runguard.os.fsync = _real
+assert after_ledger > before, (before, after_ledger)
+assert after_throttle > after_ledger, (after_ledger, after_throttle)
+print('FSYNC-OK', after_ledger - before, after_throttle - after_ledger)
+""")
+ok("_append_jsonl and throttle fsync durable state",
+   rc24 == 0 and 'FSYNC-OK' in out24, f"rc={rc24} out={out24!r} err={err24.strip()[:160]}")
+
+# ---- 25. RUNGUARD_SESSION scopes the flock, not only the ledger path ----
+holder25 = child("""
+import os, runguard, time
+os.environ['RUNGUARD_SESSION'] = 'lane-a'
+run = runguard.start_observed_run('session-lock', source='shared-src', dry_run=True)
+open(os.environ['RUNGUARD_STATE_DIR'] + '/session-a.ready', 'w').write(run.lock_key)
+time.sleep(6)
+run.success()
+""", bg=True)
+for _ in range(50):
+    if os.path.exists(f'{STATE}/session-a.ready'):
+        break
+    time.sleep(0.1)
+lock_a = open(f'{STATE}/session-a.ready').read().strip() if os.path.exists(f'{STATE}/session-a.ready') else ''
+env_b = {**ENV, 'RUNGUARD_SESSION': 'lane-b'}
+proc_b = subprocess.run(
+    [sys.executable, '-c', textwrap.dedent("""
+        import os, runguard
+        os.environ['RUNGUARD_SESSION'] = 'lane-b'
+        run = runguard.start_observed_run('session-lock', source='shared-src', dry_run=True)
+        print('LOCK', run.lock_key)
+        print('OK')
+        run.success()
+    """)],
+    env=env_b, capture_output=True, text=True, timeout=20,
+)
+holder25.wait(timeout=15)
+ok("session lane lock keys include the session slug",
+   'lane-a--' in lock_a, f"lock_a={lock_a!r}")
+ok("parallel RUNGUARD_SESSION lanes do not hard-contend the same flock",
+   proc_b.returncode == 0 and 'OK' in proc_b.stdout,
+   f"rc={proc_b.returncode} out={proc_b.stdout!r} err={proc_b.stderr.strip()[:160]}")
+ok("session B lock key differs from session A",
+   'lane-b--' in proc_b.stdout and lock_a not in proc_b.stdout.split(),
+   f"lock_a={lock_a!r} out={proc_b.stdout!r}")
+
+# ---- 26. stop pause stamps control= for durable disarm ----
+rc26, out26, err26 = child("""
+import runguard, json
+run = runguard.start_observed_run('stop-control-field', source='stop-control-field')
+runguard.post_control(run.run_id, 'stop_after_record')
+run.check_controls()
+try:
+    run.check_controls(after_record=True)
+except runguard.RunPaused:
+    pass
+else:
+    raise SystemExit('expected stop pause')
+rows = [json.loads(line) for line in open(runguard._lane_path(run.scope)) if line.strip()]
+paused = [r for r in rows if r.get('event') == 'run_paused']
+assert any(r.get('control') == 'stop_after_record' for r in paused), paused
+print('STOP-CONTROL-OK')
+""")
+ok("stop_after_record pause stamps control=stop_after_record",
+   rc26 == 0 and 'STOP-CONTROL-OK' in out26, f"rc={rc26} err={err26.strip()[:160]}")
+
+# ---- 27. Same-process lock re-acquire is refcounted ----
+rc27, out27, err27 = child("""
+import runguard
+runguard.acquire_lock('refcount-scope')
+runguard.acquire_lock('refcount-scope')  # nested
+runguard.release_lock('refcount-scope')  # still held
+# A third process must still refuse while the outer hold remains.
+import subprocess, os, sys
+env = {**os.environ}
+rc = subprocess.run(
+    [sys.executable, '-c', "import runguard; runguard.acquire_lock('refcount-scope'); print('STOLE')"],
+    env=env, capture_output=True, text=True, timeout=10,
+).returncode
+assert rc != 0, 'inner release must not unlock outer hold'
+runguard.release_lock('refcount-scope')  # final unlock
+rc2 = subprocess.run(
+    [sys.executable, '-c', "import runguard; runguard.acquire_lock('refcount-scope'); print('FREE')"],
+    env=env, capture_output=True, text=True, timeout=10,
+)
+assert rc2.returncode == 0 and 'FREE' in rc2.stdout
+print('REFCOUNT-OK')
+""")
+ok("lock re-entrancy is refcounted (inner release keeps outer hold)",
+   rc27 == 0 and 'REFCOUNT-OK' in out27, f"rc={rc27} err={err27.strip()[:200]}")
+
 print(f"\n{'='*48}\n  {passed} passed, {failed} failed\n{'='*48}")
 sys.exit(1 if failed else 0)

@@ -7,21 +7,96 @@ try{colW=JSON.parse(localStorage.getItem('observer_colw')||'{}')}catch(e){}
 const content=document.getElementById('content');
 function contentViewportHeight(){return Math.max(260, content.clientHeight-28);}
 let autoscroll=true;
+// Persist table viewport across live re-renders. A single rAF after innerHTML
+// often runs before layout, so scrollHeight is still tiny and scrollTop clamps to 0.
+let _tableScrollMem={contentTop:0,shellTop:0,shellLeft:0,key:null};
+let _scrollRestoreGen=0;
 content.addEventListener('scroll',()=>{autoscroll=content.scrollTop+content.clientHeight>content.scrollHeight-60});
 
+function _visibleRowKey(shell){
+  if(!shell)return null;
+  const top=shell.scrollTop;
+  for(const tr of shell.querySelectorAll('tbody tr[data-key]')){
+    if(tr.offsetTop+tr.offsetHeight>top+1)return tr.dataset.key||null;
+  }
+  return null;
+}
+function bindTableScrollHandlers(){
+  const shell=content.querySelector('.recordshell');
+  if(!shell||shell.dataset.scrollBound==='1')return;
+  shell.dataset.scrollBound='1';
+  shell.addEventListener('scroll',()=>{
+    // Ignore transient 0 values right after a rebuild until restore applies.
+    if(shell.scrollTop<8 && _tableScrollMem.shellTop>40 && shell.dataset.restorePending==='1')return;
+    _tableScrollMem={
+      contentTop:content.scrollTop,
+      shellTop:shell.scrollTop,
+      shellLeft:shell.scrollLeft,
+      key:_visibleRowKey(shell),
+    };
+  },{passive:true});
+}
 function captureTableScroll(){
   const shell=content.querySelector('.recordshell');
-  return {contentTop:content.scrollTop, shellTop:shell?.scrollTop??0, shellLeft:shell?.scrollLeft??0};
+  if(shell){
+    let top=shell.scrollTop;
+    let left=shell.scrollLeft;
+    let key=_visibleRowKey(shell);
+    // Live polls can re-enter render() before the previous restore rAF runs. The
+    // fresh shell is still at scrollTop 0 — do not clobber the operator viewport.
+    if(top<8 && _tableScrollMem.shellTop>40){
+      top=_tableScrollMem.shellTop;
+      left=_tableScrollMem.shellLeft||0;
+      key=_tableScrollMem.key||key;
+    }
+    _tableScrollMem={contentTop:content.scrollTop, shellTop:top, shellLeft:left, key:key||_tableScrollMem.key||null};
+  }else{
+    _tableScrollMem={..._tableScrollMem, contentTop:content.scrollTop};
+  }
+  return {..._tableScrollMem};
 }
 function restoreTableScroll(state){
   if(!state)return;
-  requestAnimationFrame(()=>{
-    content.scrollTop=Math.min(state.contentTop, Math.max(0,content.scrollHeight-content.clientHeight));
+  const gen=++_scrollRestoreGen;
+  const apply=()=>{
+    if(gen!==_scrollRestoreGen)return; // a newer render owns the viewport
+    content.scrollTop=state.contentTop||0;
     const shell=content.querySelector('.recordshell');
     if(!shell)return;
-    shell.scrollTop=Math.min(state.shellTop, Math.max(0,shell.scrollHeight-shell.clientHeight));
-    shell.scrollLeft=Math.min(state.shellLeft, Math.max(0,shell.scrollWidth-shell.clientWidth));
-  });
+    shell.dataset.restorePending='1';
+    bindTableScrollHandlers();
+    const maxTop=Math.max(0, shell.scrollHeight-shell.clientHeight);
+    const maxLeft=Math.max(0, shell.scrollWidth-shell.clientWidth);
+    let top=typeof state.shellTop==='number'?state.shellTop:0;
+    let left=typeof state.shellLeft==='number'?state.shellLeft:0;
+    // Prefer the same row after live updates so appends don't yank the viewport.
+    if(state.key){
+      const want=String(state.key);
+      let tr=null;
+      for(const row of shell.querySelectorAll('tbody tr[data-key]')){
+        if(row.dataset.key===want){tr=row;break;}
+      }
+      if(tr){
+        const rowTop=tr.offsetTop, rowBottom=rowTop+tr.offsetHeight;
+        const stillInView=top<=rowTop+1 && top+shell.clientHeight>=rowBottom-1;
+        if(!stillInView)top=rowTop;
+      }
+    }
+    shell.scrollTop=Math.min(Math.max(0, top), maxTop);
+    shell.scrollLeft=Math.min(Math.max(0, left), maxLeft);
+    _tableScrollMem={
+      contentTop:content.scrollTop,
+      shellTop:shell.scrollTop,
+      shellLeft:shell.scrollLeft,
+      key:_visibleRowKey(shell)||state.key||null,
+    };
+    shell.dataset.restorePending='0';
+  };
+  // Double rAF for layout, then a short timeout in case fonts/sticky headers reflow.
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{
+    apply();
+    setTimeout(apply, 50);
+  }));
 }
 
 // --- inline chat (v2): Command-click a column header or cell to leave an agent note ---
@@ -37,9 +112,14 @@ function labelFor(cell){
   if(cell.tagName==='TH')return 'Column · '+col;
   const tr=cell.closest('tr'); const nm=(tr&&(tr.dataset.name||tr.dataset.co))||''; return (nm?nm+' · ':'')+col;
 }
+function setChatError(msg){
+  const el=document.getElementById('chatErr');
+  if(el)el.textContent=msg||'';
+}
 function openChat(anchor,label,el,control=null){
   pendingControl=control;
   chatOpenAnchor=anchor;
+  setChatError('');
   const pop=document.getElementById('chatpop'), r=el.getBoundingClientRect();
   pop.style.display='block';
   pop.style.left=Math.max(8,Math.min(r.left,window.innerWidth-336))+'px';
@@ -53,7 +133,7 @@ function openChat(anchor,label,el,control=null){
   ti.focus();
 }
 function openRunChat(){
-  if(!sel)return;
+  if(!sel){setChatError('Pick a run in the sidebar first.');return;}
   openChat('run','Run',document.getElementById('locks'));
 }
 async function openControlChat(kind,label,prompt){
@@ -61,40 +141,87 @@ async function openControlChat(kind,label,prompt){
   await requestControl(kind);
   openChat('run',label,document.getElementById('locks'),{label,prompt});
 }
-function closeChat(){chatOpenAnchor=null;pendingControl=null;document.getElementById('chatpop').style.display='none';}
+function closeChat(){chatOpenAnchor=null;pendingControl=null;setChatError('');document.getElementById('chatpop').style.display='none';}
+function isChatMessage(m){
+  if(!m||typeof m!=='object')return false;
+  if(m.kind==='control'||m.kind==='agent_status')return false;
+  if(typeof m.text!=='string'||!m.text.trim())return false;
+  if(m.author&&!['user','agent','system'].includes(m.author))return false;
+  return true;
+}
+function agentStatusForRun(){
+  // Latest explicit agent_status: listening | responding | idle.
+  // Includes project-wide poll presence (run === "all") from /api/chat.
+  const ok=m=>m&&m.kind==='agent_status'&&['listening','responding','idle'].includes(m.status);
+  const list=Object.values(chatByAnchor).flat().filter(ok);
+  if(!list.length)return 'idle';
+  list.sort((a,b)=>String(a.ts||'').localeCompare(String(b.ts||'')));
+  const status=list[list.length-1].status;
+  return status==='listening'||status==='responding'?status:'idle';
+}
 function renderThread(forceBottom){
   const t=document.getElementById('chatthread');
   // only snap to the newest if you were already at the bottom; otherwise keep
   // your scroll position so you can read earlier messages while polls come in.
   const atBottom=t.scrollHeight-t.scrollTop-t.clientHeight<40;
   const prev=t.scrollTop;
-  const msgs=(chatByAnchor[chatOpenAnchor]||[]).filter(m=>m.kind!=='control');
-  t.innerHTML=msgs.length
+  const msgs=(chatByAnchor[chatOpenAnchor]||[]).filter(isChatMessage);
+  const agentStatus=agentStatusForRun();
+  const responding=agentStatus==='responding';
+  const listening=agentStatus==='listening';
+  let html=msgs.length
     ?msgs.map(m=>`<div class="msg ${m.author==='agent'?'agent':'user'}"><b>${m.author==='agent'?'agent':'you'}</b> <small style="color:var(--dim)">${(m.ts||'').slice(11,16)}</small>${m.resolved?' <small style="color:var(--ok)">✓ resolved</small>':''}<div>${esc(m.text)}</div></div>`).join('')
     :'<div style="color:var(--dim);font-size:12.5px">No notes here yet. Tell the agent what to change — it watches for your messages and can reply.</div>';
-  t.scrollTop=(forceBottom||atBottom)?t.scrollHeight:prev;
+  if(responding){
+    html+=`<div class="msg agent" style="opacity:.9"><span class=agentSpin></span><b>agent</b> <small style="color:var(--dim)">responding…</small></div>`;
+  }else if(listening){
+    html+=`<div class="msg agent" style="opacity:.9"><span class=agentListen></span><b>agent</b> <small style="color:var(--dim)">listening…</small></div>`;
+  }else if(!msgs.length){
+    html+='<div style="color:var(--dim);font-size:12px;margin-top:8px">No agent is listening right now. Notes still save; start <code>observer-kit poll</code> so an agent session picks them up.</div>';
+  }
+  t.innerHTML=html;
+  t.scrollTop=(forceBottom||atBottom||responding||listening)?t.scrollHeight:prev;
 }
 async function sendChat(){
   const ti=document.getElementById('chatinput'), text=ti.value.trim();
-  if(!text||!sel||!chatOpenAnchor)return;
+  setChatError('');
+  if(!text){setChatError('Type a message first.');return;}
+  if(!sel){setChatError('No run selected — pick a run in the sidebar.');return;}
+  if(!chatOpenAnchor){setChatError('Chat is not anchored — open Message agent again.');return;}
   ti.value='';
   const control=pendingControl;
   try{
-    if(control){
-      await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run:sel,anchor:'run',text:`${control.label}: ${text}`})});
-      await loadChat();
-      closeChat();
-    }else{
-      await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({run:sel,anchor:chatOpenAnchor,text})});
-      await loadChat();
+    const body=control
+      ?{run:sel,anchor:'run',text:`${control.label}: ${text}`,author:'user'}
+      :{run:sel,anchor:chatOpenAnchor,text,author:'user'};
+    const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok||data.ok===false){
+      setChatError(data.error||'Could not send message.');
+      ti.value=text;
+      return;
     }
-  }catch(e){}
+    await loadChat();
+    if(control)closeChat();
+  }catch(e){
+    setChatError('Network error — is the dashboard still running?');
+    ti.value=text;
+  }
 }
 async function loadChat(){
   if(!sel){chatByAnchor={};return;}
   try{
     const msgs=await (await fetch('/api/chat?run='+encodeURIComponent(sel))).json();
-    const by={}; for(const m of msgs){(by[m.anchor]=by[m.anchor]||[]).push(m);} chatByAnchor=by;
+    const by={};
+    for(const m of msgs){
+      if(!m||typeof m!=='object')continue;
+      // Keep agent_status for spinner; keep valid chat notes; drop junk lines.
+      if(m.kind==='agent_status'||m.kind==='control'||isChatMessage(m)){
+        const anchor=m.anchor||'run';
+        (by[anchor]=by[anchor]||[]).push(m);
+      }
+    }
+    chatByAnchor=by;
   }catch(e){}
   renderBridge();
   decorateChat();
@@ -254,21 +381,31 @@ function controlStates(){
 }
 function renderBridge(){
   const box=document.getElementById('locks'); if(!box)return;
-  const msgs=flatChat().filter(m=>m.kind!=='control');
+  const msgs=flatChat().filter(isChatMessage);
   const userNotes=msgs.filter(m=>m.author==='user');
   const unresolved=userNotes.filter(m=>!msgs.some(r=>r.author==='agent'&&r.anchor===m.anchor&&r.resolved)).length;
   const last=userNotes[userNotes.length-1];
   const controlState=controlStates();
   const active=currentLocks.filter(l=>l.alive);
   const summary=bridgeSummary();
-  const badge=active.length?'Live write':summary.state;
-  const badgeCls='bridgeBadge '+(active.length?'live':summary.cls);
+  const agentStatus=sel?agentStatusForRun():'idle';
+  const responding=agentStatus==='responding';
+  const listening=agentStatus==='listening';
+  const badge=responding?'Agent responding':listening?'Agent listening':active.length?'Live write':summary.state;
+  const badgeCls='bridgeBadge '+(responding?'responding':listening?'listening':active.length?'live':summary.cls);
+  const spin=responding
+    ?'<span class=agentSpin title="Agent is responding"></span>'
+    :listening?'<span class=agentListen title="Agent is listening"></span>':'';
   const note=sel
-    ? unresolved
-      ? `<b>${unresolved} message${unresolved>1?'s':''} waiting for the agent.</b> The active session receives these through its watcher.`
+    ? responding
+      ? `<b>${spin}Agent is responding…</b> A reply will appear in chat when it is ready.`
+      : listening
+      ? `<b>${spin}Agent is listening.</b> Send a note and the poll will deliver it to the agent session.`
+      : unresolved
+      ? `<b>${unresolved} message${unresolved>1?'s':''} waiting.</b> No agent is listening — notes are saved; run <code>observer-kit poll</code> so a session picks them up.`
       : last
-        ? `Last message to the agent was ${esc(relAge(last.ts))}.`
-        : `No messages for the agent yet.`
+        ? `Last message to the agent was ${esc(relAge(last.ts))}. No agent is listening right now.`
+        : `No messages yet. Start <code>observer-kit poll</code> so the agent shows as listening.`
     : `Pick a run to see its status and messages.`;
   const lockHtml=active.length
     ? `<div class=bridgeLock>${active.map(l=>`<div class=lock><span class=live>●</span> <b>${esc(l.scope)}</b><br><small style="color:var(--dim)">process ${l.pid} · since ${esc(l.started||'?')}</small></div>`).join('')}</div>`
@@ -284,7 +421,7 @@ function renderBridge(){
   };
   const controlsHtml=sel?[controlButton('pause','Pause'),controlButton('stop_after_record','Stop after this record'),controlButton('approve_full_run','Approve full run')].filter(Boolean).join(''):'';
   const actions=sel?`<div class=bridgeActions><button class="chatbtn" onclick="openRunChat()">Message agent</button>${controlsHtml}</div>`:'';
-  box.innerHTML=`<div class=bridgeTop><div><div class=bridgeTitle>${esc(summary.title)}</div>${summary.desc?`<div class=bridgeDesc>${esc(summary.desc)}</div>`:''}</div><span class="${badgeCls}">${badge}</span></div>
+  box.innerHTML=`<div class=bridgeTop><div><div class=bridgeTitle>${spin}${esc(summary.title)}</div>${summary.desc?`<div class=bridgeDesc>${esc(summary.desc)}</div>`:''}</div><span class="${badgeCls}">${badge}</span></div>
     <div class=bridgeGrid>
       <div class=bridgeMetric><b>${active.length}</b><small>active process${active.length===1?'':'es'}</small></div>
       <div class=bridgeMetric><b>${unresolved}</b><small>message${unresolved===1?'':'s'} for agent</small></div>
@@ -304,7 +441,10 @@ function outcomeClass(v){
 }
 function parseTs(ts){
   if(!ts)return 0;
-  const t=Date.parse(String(ts).replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})$/,'$1Z'));
+  // Accept second-only and nanosecond RFC3339 stamps from runguard/dashboard.
+  const raw=String(ts);
+  const t=Date.parse(raw.replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?$/,'$1$2Z').replace(/Z$/,'Z'));
+  // Date only has ms precision; keep lexicographic order for same-ms events via string fallback callers.
   return Number.isFinite(t)?t:0;
 }
 function relAge(ts){
@@ -507,8 +647,9 @@ function renderRecordTable(groups, gorder, label){
   if(rowKeys.length<=500)
     return `${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}${filterOpen===recTab?' filtersOpen':''}" style="height:${contentViewportHeight()}px">${subtabs}${tools}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody>${rowKeys.map(rrow).join('')}</tbody></table></div></div>`;
   // Large tables build off-screen in chunks. Keep the current table interactive
-  // until the replacement is complete, then swap once and restore its latest
-  // viewport. Restoring against an empty tbody clamps scrollTop to zero.
+  // until the replacement is complete, then swap once and restore the viewport
+  // captured at the start of render (not after a blank tbody).
+  const savedScroll={...(_tableScrollMem||{})};
   const shell=document.createElement('div');
   shell.innerHTML=`${label?`<div class=card><h4>${esc(label)}</h4></div>`:''}<div class="recordshell${hasSubtabs?' hasSubtabs':''}${filterOpen===recTab?' filtersOpen':''}" style="height:${contentViewportHeight()}px">${subtabs}${tools}<div class=tablewrap><table style="width:${gtot}px">${thead}<tbody></tbody></table></div></div>`;
   const tbody=shell.querySelector('.tablewrap tbody');
@@ -525,10 +666,10 @@ function renderRecordTable(groups, gorder, label){
     if(idx<rowKeys.length)setTimeout(appendBatch, 0);
     else {
       if(_buildAbort===abort)_buildAbort=null;
-      const latestScroll=captureTableScroll();
       content.replaceChildren(shell);
       decorateChat();
-      restoreTableScroll(latestScroll);
+      bindTableScrollHandlers();
+      restoreTableScroll(savedScroll);
     }
   }
   appendBatch();
@@ -666,17 +807,13 @@ function latestAttemptIndex(){
   return idx;
 }
 function recordWindowStart(){
-  const latest=latestAttemptIndex();
-  if(latest<0)return 0;
-  const dry=Boolean(all[latest].dry_run);
-  let start=latest;
-  for(let i=latest-1;i>=0;i--){
-    if(eventName(all[i])==='run_started'){
-      if(Boolean(all[i].dry_run)!==dry)break;
-      start=i;
-    }
+  // Business rows accumulate across dry and full attempts on a continuous lane.
+  // A later dry sample must not hide an earlier full-run's Data/Attention rows.
+  // Lifecycle/timeline views still use attemptEvents() → latest attempt only.
+  for(let i=0;i<all.length;i++){
+    if(eventName(all[i])==='run_started')return i;
   }
-  return start;
+  return 0;
 }
 function attemptEvents(){
   const idx=latestAttemptIndex();
@@ -938,7 +1075,9 @@ function render(){
     if(html!==null){
       content.innerHTML=html;
       decorateChat();
-      restoreTableScroll(tableScroll);
+      bindTableScrollHandlers();
+      restoreTableScroll(tableScroll||_tableScrollMem);
+      updateNewRowsHint();
     }
     return;
   }
@@ -1055,7 +1194,12 @@ function activityStrip(flatRecords, errors){
   const started=[...events].find(e=>(e.event||e.action)==='run_started')||{};
   const finished=[...events].reverse().find(e=>['run_finished','run_failed','run_abandoned','run_paused'].includes(e.event||e.action));
   const dry=[...events].reverse().find(e=>e.dry_run!==undefined);
-  const dryText=dry ? (dry.dry_run?'Dry run · no writes':'Live run · writes enabled') : 'Write mode unknown';
+  const dryRun=Boolean(dry&&dry.dry_run);
+  const dryText=finished
+    ? (dryRun?'Dry sample complete':'Full run complete')
+    : dry
+      ? (dryRun?'Dry run · no writes':'Live run · writes enabled')
+      : 'Write mode unknown';
   const lastRecord=[...events].reverse().find(e=>(e.event||e.action)==='record')||{};
   const currentRow=flatRecords.find(({row})=>String(row.status||'').toLowerCase()==='running');
   const lastAge=relAge(last.ts);
@@ -1067,7 +1211,7 @@ function activityStrip(flatRecords, errors){
   }else if(stale){
     state='Stale';
     cls='stale';
-  }else if((selMeta&&selMeta.live)||currentRow){
+  }else if((selMeta&&selMeta.live)||currentRow||currentLocks.some(l=>l.alive)){
     state='Running';
     cls='live';
   }
@@ -1107,23 +1251,70 @@ function activityStrip(flatRecords, errors){
     return !['running','queued','pending'].includes(status);
   }).length;
   const measuredProgress=[...progressEvents()].reverse().find(e=>e.done!==undefined&&e.total!==undefined);
-  const progress=started.todo
-    ? (measuredProgress
-        ? `${measuredProgress.done} / ${measuredProgress.total}`
-        : `${completedProgress} / ${started.todo}`)
-    : flatRecords.length
-      ? `${flatRecords.length} records`
-      : measuredProgress
-        ? `${measuredProgress.done} / ${measuredProgress.total}`
-      : events.length
-        ? `${events.length} events`
-        : 'No events yet';
+  let progress='No events yet';
+  if(measuredProgress){
+    progress=`${measuredProgress.done} / ${measuredProgress.total}`;
+  }else if(started.todo){
+    // Avoid "3 / 2" when live extras exceed the original todo count.
+    progress=completedProgress>Number(started.todo)
+      ? `${completedProgress} rows · planned ${started.todo}`
+      : `${completedProgress} / ${started.todo}`;
+  }else if(primaryTable&&progressRecords.length){
+    progress=`${progressRecords.length} ${primaryTable}`;
+  }else if(flatRecords.length){
+    progress=`${flatRecords.length} records`;
+  }else if(events.length){
+    progress=`${events.length} events`;
+  }
+  const agentPresence=agentStatusForRun();
+  const agentSpin=agentPresence==='responding'
+    ? `<span class=agentSpin title="Agent is responding"></span>`
+    : agentPresence==='listening'
+    ? `<span class=agentListen title="Agent is listening"></span>`
+    : '';
   return `<div class="activity ${cls}">
-    <div><span class=k>Status</span><span class="v ${cls==='failed'?'err':cls==='stale'?'warn':cls==='done'?'info':'ok'}">${state}</span></div>
-    <div><span class=k>Now</span><span class=v title="${esc(current)}">${esc(current)}</span></div>
-    <div><span class=k>Last event</span><span class=v>${esc(lastAge)}</span></div>
-    <div><span class=k>Mode / progress</span><span class=v>${esc(dryText)} · ${esc(progress)}${attention?` · ${attention} attention`:''}</span></div>
+    <div><span class=k>Status</span><span class="v ${cls==='failed'?'err':cls==='stale'?'warn':cls==='done'?'info':'ok'}">${agentSpin}${state}</span></div>
+    <div><span class=k>Now</span><span class="v title="${esc(current)}">${esc(current)}</span></div>
+    <div><span class=k>Last event</span><span class="v">${esc(lastAge)}</span></div>
+    <div><span class=k>Mode / progress</span><span class="v">${esc(dryText)} · ${esc(progress)}${attention?` · ${attention} attention`:''}</span></div>
   </div>`;
+}
+
+let _seenRecordCount=0,_newRowsBelow=0;
+function updateNewRowsHint(){
+  let hint=document.getElementById('newRowsHint');
+  if(!hint){
+    hint=document.createElement('button');
+    hint.id='newRowsHint';
+    hint.type='button';
+    hint.className='newRowsHint';
+    hint.onclick=()=>{
+      const shell=content.querySelector('.recordshell');
+      if(shell)shell.scrollTop=shell.scrollHeight;
+      _newRowsBelow=0;
+      _seenRecordCount=document.querySelectorAll('.recordshell tbody tr').length;
+      hint.classList.remove('show');
+    };
+    content.appendChild(hint);
+  }
+  const shell=content.querySelector('.recordshell');
+  const rows=document.querySelectorAll('.recordshell tbody tr').length;
+  if(!shell||view!=='records'){hint.classList.remove('show');return;}
+  const nearBottom=shell.scrollTop+shell.clientHeight>shell.scrollHeight-80;
+  if(nearBottom){
+    _seenRecordCount=rows;
+    _newRowsBelow=0;
+    hint.classList.remove('show');
+    return;
+  }
+  if(rows>_seenRecordCount){
+    _newRowsBelow+=rows-_seenRecordCount;
+    _seenRecordCount=rows;
+  }
+  if(_newRowsBelow>0){
+    hint.textContent=`↓ ${_newRowsBelow} new row${_newRowsBelow===1?'':'s'} below`;
+    hint.classList.add('show');
+  }else hint.classList.remove('show');
 }
 
 async function poll(){
@@ -1135,9 +1326,11 @@ async function poll(){
     window._runs=runs;
     const q=(document.getElementById('q').value||'').toLowerCase();
     const runsElement=document.getElementById('runs');
-    runsElement.innerHTML=runs.filter(r=>(r.name+r.label+(r.desc||'')).toLowerCase().includes(q)).map(r=>
-      `<div class="run ${sel===r.id?'sel':''}" data-run-id="${esc(r.id)}"><span class=${r.live?'live':'dead'}>${r.live?'● running':'○'}</span> <b>${esc(r.name||r.label)}</b><small>${esc(r.when||'')}${r.desc?' — '+esc(r.desc):''}</small></div>`
-    ).join('');
+    runsElement.innerHTML=runs.filter(r=>(r.name+r.label+(r.desc||'')).toLowerCase().includes(q)).map(r=>{
+      const title=r.desc&&r.desc!==r.name?r.name:r.name;
+      const sub=r.desc&&r.desc!==r.name?r.desc:(r.when||'');
+      return `<div class="run ${sel===r.id?'sel':''}" data-run-id="${esc(r.id)}"><span class=${r.live?'live':'dead'}>${r.live?'● running':'○'}</span> <b>${esc(title)}</b><small>${esc(sub||r.label||'')}</small></div>`;
+    }).join('');
     for(const element of runsElement.querySelectorAll('[data-run-id]')){
       element.addEventListener('click',()=>pick(element.dataset.runId));
     }
@@ -1156,9 +1349,13 @@ async function poll(){
     }
     if(sel){
       const res=await (await fetch('/api/events?run='+encodeURIComponent(sel)+'&offsets='+encodeURIComponent(JSON.stringify(offsets)))).json();
-      offsets=res.offsets;
+      offsets=res.offsets||{};
       more=Boolean(res.more);
-      if(res.events.length){all.push(...res.events);render();}
+      if(res.reset){all=[];}
+      if(res.events&&res.events.length){all.push(...res.events);render();}
+      else if(res.reset){render();}
+      // Catch-up without spinning: only tight-loop when we actually got events.
+      if(more&&!(res.events&&res.events.length))more=false;
     }
     await loadControls();
     await loadChat();

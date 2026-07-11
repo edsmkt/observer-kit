@@ -1,44 +1,39 @@
 #!/usr/bin/env python3
-"""Run the mixed single-request and batch-request Observer Flow demo."""
+"""Run the synthetic mixed row and batch Observer Flow example."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any
 
 from batch_synthetic_data import build_rows
-from flow_coordinator import (
+from demo_runtime import (
+    DemoRuntime,
+    HERE,
+    REPO,
     REUSABLE,
-    aggregate_node_status,
     build_plan_id,
     canonical_hash,
     connect,
     emit,
-    flow_snapshot,
     graph_event,
-    invoke_node,
-    latest_node_results,
-    matching_result,
-    next_attempt,
-    node_input_hash,
-    persist_result,
-    load_source_rows,
     load_node,
+    load_source_rows,
+    matching_result,
+    node_input_hash,
     ordered_nodes,
-    result_map,
     restore_cached_result,
+    result_map,
     row_data,
     unit_route,
 )
 
 
-HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
 TABLE = "websites"
 
 
@@ -58,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def connect_state(path: Path):
+def connect_state(path: Path) -> sqlite3.Connection:
     db = connect(path)
     db.executescript(
         """
@@ -85,7 +80,7 @@ def chunks(values: list[str], size: int) -> list[list[str]]:
     return [values[index:index + size] for index in range(0, len(values), size)]
 
 
-def row_status(db, row_key: str) -> tuple[str, str]:
+def website_row_status(db: sqlite3.Connection, row_key: str) -> tuple[str, str]:
     results = result_map(db, row_key)
     failures = [result["error"] for result in results.values() if result["status"] == "failed"]
     if failures:
@@ -97,223 +92,7 @@ def row_status(db, row_key: str) -> tuple[str, str]:
     return "running", ""
 
 
-def emit_record(ledger, run, db, row_key: str, node: dict, nodes: list[dict]) -> None:
-    data = row_data(db, row_key)
-    status, error = row_status(db, row_key)
-    projection = {
-        key: value
-        for key, value in data.items()
-        if key not in {"fixture_kind", "index"}
-    }
-    emit(
-        ledger,
-        run,
-        "record",
-        table=TABLE,
-        key=row_key,
-        current_node=node.get("label", node["id"]),
-        flow_status=status,
-        flow_json=flow_snapshot(db, row_key, nodes),
-        error=error,
-        **projection,
-    )
-
-
-def node_counts(db, node_id: str) -> dict[str, int]:
-    counts = {name: 0 for name in ("succeeded", "skipped", "held", "failed", "cached")}
-    for row in latest_node_results(db, node_id):
-        if row["status"] in counts:
-            counts[row["status"]] += 1
-    return counts
-
-
-def emit_node(ledger, run, db, node: dict, total: int, _status: str, **extra: Any) -> None:
-    counts = node_counts(db, node["id"])
-    spend = sum(float(row["spend_units"]) for row in latest_node_results(db, node["id"]))
-    emit(
-        ledger,
-        run,
-        "flow_node",
-        node_id=node["id"],
-        node_label=node.get("label", node["id"]),
-        status=aggregate_node_status(counts, total, _status),
-        total=total,
-        completed=sum(counts.values()),
-        spend_units=round(float(spend), 4),
-        **counts,
-        **extra,
-    )
-
-
-def emit_terminal(
-    ledger,
-    run,
-    db,
-    row_key: str,
-    node: dict,
-    nodes: list[dict],
-    *,
-    status: str,
-    fields: dict | None = None,
-    evidence: dict | None = None,
-    reason: str,
-    error: str = "",
-    spend_units: float = 0,
-    duration_ms: int = 1,
-    batch_id: str = "",
-    input_hash: str = "",
-    attempt: int = 0,
-) -> None:
-    input_hash = input_hash or node_input_hash(
-        node, row_data(db, row_key), run.dry_run, result_map(db, row_key),
-    )
-    attempt = attempt or next_attempt(db, row_key, node["id"])
-    persist_result(
-        db,
-        row_key,
-        node["id"],
-        status,
-        fields or {},
-        evidence or {},
-        reason,
-        error,
-        spend_units,
-        duration_ms,
-        run_id=run.scope,
-        table_name=TABLE,
-        node_version=str(node.get("version", "1")),
-        input_hash=input_hash,
-        attempt=attempt,
-    )
-    event = {
-        "node_id": node["id"],
-        "node_label": node.get("label", node["id"]),
-        "table": TABLE,
-        "key": row_key,
-        "status": status,
-        "reason": reason,
-        "error": error,
-        "node_version": str(node.get("version", "1")),
-        "input_hash": input_hash,
-        "unit_attempt": attempt,
-        "duration_ms": duration_ms,
-        "spend_units": spend_units,
-    }
-    if batch_id:
-        event["batch_id"] = batch_id
-    emit(ledger, run, "flow_unit", **event)
-    emit_record(ledger, run, db, row_key, node, nodes)
-
-
-def execute_map_unit(
-    ledger,
-    run,
-    db,
-    row_key: str,
-    node: dict,
-    nodes: list[dict],
-    node_run,
-    *,
-    provider_rate: float,
-    delay: float,
-) -> str:
-    current = row_data(db, row_key)
-    dependencies = result_map(db, row_key)
-    input_hash = node_input_hash(node, current, run.dry_run, dependencies)
-    prior = matching_result(db, row_key, node["id"], input_hash)
-    if prior and prior["status"] in REUSABLE:
-        restore_cached_result(db, row_key, prior)
-        emit(
-            ledger,
-            run,
-            "flow_unit",
-            node_id=node["id"],
-            node_label=node.get("label", node["id"]),
-            table=TABLE,
-            key=row_key,
-            status="cached",
-            reason="reused durable node result",
-            node_version=prior["node_version"],
-            input_hash=input_hash,
-            unit_attempt=prior["attempt"],
-            duration_ms=prior["duration_ms"],
-            spend_units=0,
-        )
-        emit_record(ledger, run, db, row_key, node, nodes)
-        return prior["status"]
-
-    route, route_reason = unit_route(node, current, dependencies)
-    emit(
-        ledger,
-        run,
-        "flow_unit",
-        node_id=node["id"],
-        node_label=node.get("label", node["id"]),
-        table=TABLE,
-        key=row_key,
-        status="running",
-    )
-    started = time.monotonic()
-    attempt = next_attempt(db, row_key, node["id"])
-    if route == "skipped":
-        status = "skipped"
-        fields: dict[str, Any] = {}
-        evidence: dict[str, Any] = {}
-        reason = route_reason
-        error = ""
-        spend_units = 0.0
-    elif route == "held":
-        status = "held"
-        fields = {}
-        evidence = {}
-        reason = route_reason
-        error = ""
-        spend_units = 0.0
-    else:
-        try:
-            spend = node.get("spend")
-            if spend:
-                from runguard import throttle
-                throttle(f"demo-{spend['provider']}", provider_rate)
-            result = invoke_node(node_run, node, current, run.dry_run)
-            status = "succeeded"
-            fields = dict(result.get("fields", {}))
-            evidence = dict(result.get("evidence", {}))
-            reason = "durable node result committed"
-            error = ""
-            spend_units = float(result.get("spend_units", 0))
-        except Exception as exc:
-            status = "failed"
-            fields = {}
-            evidence = {}
-            reason = "node execution failed"
-            error = str(exc)
-            spend_units = float(node.get("spend", {}).get("units_per_call", 0))
-    duration_ms = max(1, int((time.monotonic() - started) * 1000))
-    emit_terminal(
-        ledger,
-        run,
-        db,
-        row_key,
-        node,
-        nodes,
-        status=status,
-        fields=fields,
-        evidence=evidence,
-        reason=reason,
-        error=error,
-        spend_units=spend_units,
-        duration_ms=duration_ms,
-        input_hash=input_hash,
-        attempt=attempt,
-    )
-    run.checkpoint(node["id"], row_key)
-    run.check_controls(after_record=True)
-    time.sleep(max(0.0, delay))
-    return status
-
-
-def save_batch_response(db, batch_id: str, response: dict) -> None:
+def save_batch_response(db: sqlite3.Connection, batch_id: str, response: dict) -> None:
     with db:
         db.execute(
             """
@@ -332,20 +111,9 @@ def save_batch_response(db, batch_id: str, response: dict) -> None:
         )
 
 
-def complete_batch(db, batch_id: str) -> None:
-    with db:
-        db.execute(
-            "UPDATE batch_calls SET status = 'complete', updated_at = ? WHERE batch_id = ?",
-            (time.time(), batch_id),
-        )
-
-
 def execute_batch_node(
-    ledger,
-    run,
-    db,
+    runtime: DemoRuntime,
     node: dict,
-    nodes: list[dict],
     rows: list[dict],
     *,
     requested_batch_size: int,
@@ -353,20 +121,19 @@ def execute_batch_node(
     delay: float,
     throttle,
 ) -> int:
-    """Run one batch node over eligible rows and persist each member by stable key."""
+    db, run, ledger = runtime.db, runtime.run, runtime.ledger
     batch_size = max(
         1,
         min(requested_batch_size, int(node.get("batch", {}).get("max_items", requested_batch_size))),
     )
-    key_field = "domain"
     ready_keys: list[str] = []
     cached_keys: list[str] = []
     member_hashes: dict[str, str] = {}
     cached_results: dict[str, dict] = {}
 
-    emit_node(ledger, run, db, node, len(rows), "running", provider_calls=0)
+    runtime.emit_node(node, len(rows), "running", provider_calls=0)
     for source_row in rows:
-        key = str(source_row[key_field])
+        key = str(source_row["domain"])
         current = row_data(db, key)
         dependencies = result_map(db, key)
         input_hash = node_input_hash(node, current, run.dry_run, dependencies)
@@ -392,20 +159,20 @@ def execute_batch_node(
                 duration_ms=prior["duration_ms"],
                 spend_units=0,
             )
-            emit_record(ledger, run, db, key, node, nodes)
+            runtime.emit_record(key, node)
+            # Cache hits still form a durable row boundary — do not skip
+            # operator pause/stop (same contract as the non-batch path).
+            run.checkpoint(node["id"], key)
+            run.check_controls(after_record=True)
             continue
 
         route, reason = unit_route(node, current, dependencies)
         if route == "execute":
             ready_keys.append(key)
             continue
-        emit_terminal(
-            ledger,
-            run,
-            db,
+        runtime.persist_terminal(
             key,
             node,
-            nodes,
             status=route,
             reason=reason,
             input_hash=input_hash,
@@ -416,8 +183,7 @@ def execute_batch_node(
     cached_groups = chunks(cached_keys, batch_size)
     pending_groups = chunks(ready_keys, batch_size)
     total_batches = len(cached_groups) + len(pending_groups)
-    batches_completed = 0
-    provider_calls = 0
+    batches_completed = provider_calls = 0
 
     for keys in cached_groups:
         batches_completed += 1
@@ -425,7 +191,7 @@ def execute_batch_node(
             "node_id": node["id"],
             "keys": keys,
             "input_hashes": [member_hashes[key] for key in keys],
-        }).split(":", 1)[1][:7]
+        }).split(":", 1)[1][:16]
         original_spend = sum(float(cached_results[key]["spend_units"]) for key in keys)
         emit(
             ledger,
@@ -444,10 +210,7 @@ def execute_batch_node(
             reused_response=True,
             provider_called=False,
         )
-        emit_node(
-            ledger,
-            run,
-            db,
+        runtime.emit_node(
             node,
             len(rows),
             "running",
@@ -463,7 +226,7 @@ def execute_batch_node(
             "node_id": node["id"],
             "keys": keys,
             "input_hashes": [member_hashes[key] for key in keys],
-        }).split(":", 1)[1][:7]
+        }).split(":", 1)[1][:16]
         batch_id = f"{node['id']}-{batches_completed:02d}-{digest}"
         with db:
             db.execute(
@@ -474,18 +237,8 @@ def execute_batch_node(
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    batch_id,
-                    node["id"],
-                    batches_completed,
-                    total_batches,
-                    "planned",
-                    json.dumps(keys),
-                    "",
-                    "",
-                    0,
-                    len(keys),
-                    "",
-                    time.time(),
+                    batch_id, node["id"], batches_completed, total_batches, "planned",
+                    json.dumps(keys), "", "", 0, len(keys), "", time.time(),
                 ),
             )
         emit(
@@ -514,10 +267,9 @@ def execute_batch_node(
                 batch_id=batch_id,
             )
 
-        batch_record = db.execute(
+        stored = db.execute(
             "SELECT response_json FROM batch_calls WHERE batch_id = ?", (batch_id,)
-        ).fetchone()
-        stored = batch_record["response_json"]
+        ).fetchone()["response_json"]
         reused_response = bool(stored)
         if stored:
             response = json.loads(stored)
@@ -531,25 +283,19 @@ def execute_batch_node(
         batch_started = time.monotonic()
         succeeded = failed = 0
         for key in keys:
-            member = response.get("results", {}).get(key)
-            if member is None:
-                member = {
-                    "status": "failed",
-                    "fields": {"label_batch_id": batch_id, "label_status": "response missing"},
-                    "evidence": {"request_id": response.get("request_id", "")},
-                    "error": "Batch response omitted this member",
-                    "spend_units": 0,
-                }
+            member = response.get("results", {}).get(key) or {
+                "status": "failed",
+                "fields": {"label_batch_id": batch_id, "label_status": "response missing"},
+                "evidence": {"request_id": response.get("request_id", "")},
+                "error": "Batch response omitted this member",
+                "spend_units": 0,
+            }
             status = member.get("status", "succeeded")
             succeeded += status == "succeeded"
             failed += status == "failed"
-            emit_terminal(
-                ledger,
-                run,
-                db,
+            runtime.persist_terminal(
                 key,
                 node,
-                nodes,
                 status=status,
                 fields=dict(member.get("fields", {})),
                 evidence=dict(member.get("evidence", {})),
@@ -560,7 +306,11 @@ def execute_batch_node(
                 batch_id=batch_id,
                 input_hash=member_hashes[key],
             )
-        complete_batch(db, batch_id)
+        with db:
+            db.execute(
+                "UPDATE batch_calls SET status = 'complete', updated_at = ? WHERE batch_id = ?",
+                (time.time(), batch_id),
+            )
         saved = round(
             float(response["individual_equivalent_units"]) - float(response["spend_units"]), 4
         )
@@ -584,10 +334,7 @@ def execute_batch_node(
             reused_response=reused_response,
             provider_called=not reused_response,
         )
-        emit_node(
-            ledger,
-            run,
-            db,
+        runtime.emit_node(
             node,
             len(rows),
             "running",
@@ -598,10 +345,7 @@ def execute_batch_node(
         run.checkpoint(node["id"], batch_id)
         run.check_controls(after_record=True)
 
-    emit_node(
-        ledger,
-        run,
-        db,
+    runtime.emit_node(
         node,
         len(rows),
         "complete",
@@ -619,10 +363,9 @@ def main() -> int:
     os.environ["RUNGUARD_STATE_DIR"] = str(state_dir)
     os.environ["RUNGUARD_SESSION"] = args.session
     sys.path.insert(0, str(REPO / "skills" / "observer-kit"))
-    from runguard import ledger, start_observed_run, throttle
+    from runguard import RunPaused, ledger, start_observed_run, throttle
 
-    flow_path = Path(args.flow).expanduser().resolve()
-    flow = json.loads(flow_path.read_text(encoding="utf-8"))
+    flow = json.loads(Path(args.flow).expanduser().resolve().read_text(encoding="utf-8"))
     rows = build_rows(max(1, min(args.limit, len(build_rows()))))
     nodes = ordered_nodes(flow["nodes"])
     plan_id = build_plan_id(
@@ -653,6 +396,15 @@ def main() -> int:
             {"key": "failed", "label": "failed"},
         ],
     )
+    runtime = DemoRuntime(
+        ledger,
+        run,
+        db,
+        nodes,
+        table=TABLE,
+        hidden_fields={"fixture_kind", "index"},
+        row_status=website_row_status,
+    )
     try:
         emit(
             ledger,
@@ -667,18 +419,15 @@ def main() -> int:
 
         source_node = {"id": "source", "label": "Source loaded"}
         for row in rows:
-            emit_record(ledger, run, db, row["domain"], source_node, nodes)
+            runtime.emit_record(row["domain"], source_node)
             time.sleep(max(0.0, args.delay * 0.04))
 
         for node in nodes:
             mode = node.get("mode")
             if mode == "batch":
                 execute_batch_node(
-                    ledger,
-                    run,
-                    db,
+                    runtime,
                     node,
-                    nodes,
                     rows,
                     requested_batch_size=args.batch_size,
                     provider_rate=args.provider_rate,
@@ -692,44 +441,28 @@ def main() -> int:
                     f"{node['id']} uses {mode!r}"
                 )
             node_run = load_node(node)
-            emit_node(ledger, run, db, node, len(rows), "running", provider_calls=0)
+            runtime.emit_node(node, len(rows), "running", provider_calls=0)
             for position, row in enumerate(rows, start=1):
-                execute_map_unit(
-                    ledger,
-                    run,
-                    db,
+                runtime.persist_and_emit_row(
                     row["domain"],
                     node,
-                    nodes,
                     node_run,
                     provider_rate=args.provider_rate,
                     delay=args.delay * (0.45 if node.get("spend") else 0.08),
+                    position=position,
+                    total=len(rows),
                 )
                 calls = sum(
-                    node_counts(db, node["id"])[name] for name in ("succeeded", "failed")
+                    runtime.node_counts(node["id"])[name] for name in ("succeeded", "failed")
                 )
-                emit_node(
-                    ledger,
-                    run,
-                    db,
+                runtime.emit_node(
                     node,
                     len(rows),
                     "running",
                     provider_calls=calls if node.get("spend") else 0,
                     position=position,
                 )
-            emit_node(
-                ledger,
-                run,
-                db,
-                node,
-                len(rows),
-                "complete",
-                provider_calls=(
-                    sum(node_counts(db, node["id"])[name] for name in ("succeeded", "failed"))
-                    if node.get("spend") else 0
-                ),
-            )
+            runtime.emit_node(node, len(rows), "complete", provider_calls=0)
 
         final_rows = [row_data(db, row["domain"]) for row in rows]
         label_counts = Counter(row.get("label") for row in final_rows if row.get("label"))
@@ -743,7 +476,7 @@ def main() -> int:
             """
         ).fetchone()
         units_saved = round(float(batch_totals["individual"]) - float(batch_totals["spent"]), 4)
-        failed = sum(row_status(db, row["domain"])[0] == "failed" for row in rows)
+        failed = sum(website_row_status(db, row["domain"])[0] == "failed" for row in rows)
         provider_calls = len(rows) + int(batch_totals["calls"])
         for metric, value in (
             ("scraped", scraped),
@@ -768,7 +501,10 @@ def main() -> int:
             execution_mode="dry_run" if run.dry_run else "full_run",
         )
         return 0
-    except BaseException as exc:
+    except Exception as exc:
+        # RunPaused already closed the attempt with run_paused; do not fail it.
+        if isinstance(exc, RunPaused):
+            raise
         run.fail(exc)
         raise
     finally:

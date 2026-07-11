@@ -37,7 +37,11 @@ SKILL_DIR = _skill_dir()
 
 
 def _timestamp() -> str:
-    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    """UTC RFC 3339 with nanoseconds — matches runguard ordering/chat watermarks."""
+    ns = time.time_ns()
+    secs, nsec = divmod(ns, 1_000_000_000)
+    base = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(secs))
+    return f'{base}.{nsec:09d}Z'
 
 
 def skill_file(name: str) -> Path:
@@ -174,7 +178,86 @@ def _print_watcher_status(state_dir: Path) -> int:
     return 0
 
 
-def _stream_watcher_line(line: str) -> None:
+_AGENT_STATUSES = frozenset({"listening", "responding", "idle"})
+
+
+def _append_agent_status(
+    state_dir: Path,
+    run_id: str,
+    status: str,
+    *,
+    pid: int | None = None,
+) -> None:
+    """Mark agent presence for the dashboard: listening | responding | idle.
+
+    ``listening`` means a poll is waiting for the operator. ``responding`` means
+    a note was delivered and the session is working. ``idle`` clears both.
+    """
+    if status not in _AGENT_STATUSES or not run_id:
+        return
+    labels = {
+        "listening": "Agent is listening",
+        "responding": "Agent is responding",
+        "idle": "Agent idle",
+    }
+    rec = {
+        "ts": _timestamp(),
+        "run": str(run_id),
+        "anchor": "run",
+        "author": "system",
+        "kind": "agent_status",
+        "status": status,
+        "text": labels[status],
+    }
+    if pid is not None:
+        rec["pid"] = int(pid)
+    path = _chat_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError:
+            pass
+
+
+def _chat_sig(message: dict) -> str:
+    return json.dumps(
+        [message.get("ts"), message.get("run"), message.get("anchor"), message.get("text")],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _load_chat_messages(state_dir: Path) -> list[dict]:
+    path = _chat_path(state_dir)
+    if not path.is_file():
+        return []
+    out: list[dict] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict):
+                out.append(rec)
+    return out
+
+
+def _wakes_agent(message: dict, run_id: str | None, all_runs: bool) -> bool:
+    if message.get("author") != "user" and message.get("kind") != "control":
+        return False
+    if all_runs:
+        return True
+    return message.get("run") == run_id
+
+
+def _stream_watcher_line(line: str, state_dir: Path | None = None) -> None:
     line = line.strip()
     if not line:
         return
@@ -189,6 +272,14 @@ def _stream_watcher_line(line: str) -> None:
     text = payload.get("text", "")
     if text:
         print(f"[observer] dashboard note for {run} {anchor}: {text}", flush=True)
+    # User notes / control wakes mean the agent session is about to act — show spinner.
+    if state_dir and run and (
+        payload.get("author") == "user" or payload.get("kind") == "control"
+    ):
+        try:
+            _append_agent_status(state_dir, str(run), "responding")
+        except OSError:
+            pass
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -225,7 +316,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     assert proc.stdout is not None
     try:
         for line in proc.stdout:
-            _stream_watcher_line(line)
+            _stream_watcher_line(line, state_dir=state_dir)
     except KeyboardInterrupt:
         proc.terminate()
         return 130
@@ -248,29 +339,244 @@ def cmd_reply(args: argparse.Namespace) -> int:
     }
     with _chat_path(state_dir).open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    try:
+        _append_agent_status(state_dir, args.run, "idle")
+    except OSError:
+        pass
     print(f"replied to {args.run} {args.anchor}")
     return 0
 
 
-def _dashboard_responds(port: int) -> bool:
+def cmd_agent_status(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    if args.listening:
+        status = "listening"
+    elif args.responding:
+        status = "responding"
+    else:
+        status = "idle"
+    pid = os.getpid() if status == "listening" else None
+    _append_agent_status(state_dir, args.run, status, pid=pid)
+    print(f"agent status {status} for {args.run}")
+    return 0
+
+
+def cmd_poll(args: argparse.Namespace) -> int:
+    """AXI-style long-poll: mark listening, block until a dashboard note, exit.
+
+    Like ``lavish-axi poll``: leave this running (or re-run if the harness times
+    out). Notes stay durable in chat.jsonl either way. On delivery, presence
+    flips to responding so the dashboard spinner shows; reply then sets idle.
+    """
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    if args.all and args.run:
+        raise SystemExit("choose --run or --all, not both")
+    if not args.all and not args.run:
+        raise SystemExit("--run is required unless --all is set")
+    if args.reply and args.all:
+        raise SystemExit("--reply requires --run (one lane)")
+
+    run_id = None if args.all else str(args.run)
+    all_runs = bool(args.all)
+
+    if args.reply:
+        text = args.reply.strip()
+        if not text:
+            raise SystemExit("--reply text must be non-empty")
+        rec = {
+            "ts": _timestamp(),
+            "run": run_id,
+            "anchor": args.anchor,
+            "author": "agent",
+            "text": text,
+            "resolved": bool(args.resolved),
+        }
+        with _chat_path(state_dir).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        print(f"replied to {run_id} {args.anchor}", flush=True)
+
+    # Presence: listening while we wait. Clean up to idle on every exit path
+    # except delivery (which becomes responding for the harness/agent turn).
+    presence_run = run_id or "all"
+    delivered = False
+
+    def _mark_idle() -> None:
+        if delivered:
+            return
+        try:
+            if all_runs:
+                # Clear the project-wide marker used when --all is set.
+                _append_agent_status(state_dir, "all", "idle")
+            elif run_id:
+                _append_agent_status(state_dir, run_id, "idle")
+        except OSError:
+            pass
+
+    if all_runs:
+        _append_agent_status(state_dir, "all", "listening", pid=os.getpid())
+    else:
+        _append_agent_status(state_dir, run_id, "listening", pid=os.getpid())
+
+    seen = set()
+    if not args.include_existing:
+        for message in _load_chat_messages(state_dir):
+            if _wakes_agent(message, run_id, all_runs):
+                seen.add(_chat_sig(message))
+
+    poll = max(0.05, float(args.poll))
+    deadline = (time.time() + float(args.timeout)) if args.timeout else None
+    last_heartbeat = time.time()
+    print(
+        f"[observer] listening for dashboard notes"
+        f" ({'all runs' if all_runs else run_id}); leave this poll running",
+        file=sys.stderr,
+        flush=True,
+    )
     try:
-        with urlopen(f"http://127.0.0.1:{port}/api/runs", timeout=0.25) as response:
-            return response.status == 200
-    except (OSError, URLError):
+        while True:
+            fresh = []
+            for message in _load_chat_messages(state_dir):
+                if not _wakes_agent(message, run_id, all_runs):
+                    continue
+                sig = _chat_sig(message)
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                fresh.append(message)
+            if fresh:
+                delivered = True
+                # Flip presence so the UI shows work-in-progress until reply.
+                targets = {str(m.get("run") or "") for m in fresh if m.get("run")}
+                if not targets and run_id:
+                    targets = {run_id}
+                for target in sorted(targets):
+                    if target:
+                        _append_agent_status(state_dir, target, "responding")
+                for message in fresh:
+                    print(
+                        "OBSERVER_CHAT_EVENT "
+                        + json.dumps(message, ensure_ascii=False, default=str),
+                        flush=True,
+                    )
+                    text = message.get("text", "")
+                    print(
+                        f"[observer] dashboard note for {message.get('run')} "
+                        f"{message.get('anchor')}: {text}",
+                        flush=True,
+                    )
+                # Compact next-step hints (AXI-style contextual disclosure).
+                sample_run = next(
+                    (str(m.get("run")) for m in fresh if m.get("run")),
+                    run_id or "<run-id>",
+                )
+                print(
+                    "help[3]: "
+                    f"Inspect the run/ledger, then `observer-kit reply {state_dir} "
+                    f"--run {sample_run} --text \"...\" [--resolved]`; "
+                    f"re-run `observer-kit poll {state_dir} --run {sample_run}` "
+                    "to keep listening; notes stay durable if the poll exits.",
+                    flush=True,
+                )
+                if args.follow:
+                    delivered = False  # keep listening after a batch
+                    if all_runs:
+                        _append_agent_status(
+                            state_dir, "all", "listening", pid=os.getpid(),
+                        )
+                    elif run_id:
+                        _append_agent_status(
+                            state_dir, run_id, "listening", pid=os.getpid(),
+                        )
+                    continue
+                return 0
+            if deadline is not None and time.time() >= deadline:
+                print("[observer] poll timed out with no new notes", file=sys.stderr, flush=True)
+                return 0
+            now = time.time()
+            if now - last_heartbeat >= 30:
+                print("[observer] still listening…", file=sys.stderr, flush=True)
+                last_heartbeat = now
+            time.sleep(poll)
+    except KeyboardInterrupt:
+        print("[observer] poll interrupted", file=sys.stderr, flush=True)
+        return 130
+    finally:
+        _mark_idle()
+
+
+def _dashboard_state_dir(port: int) -> Path | None:
+    """Return the state directory a dashboard on ``port`` is serving, if known."""
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/meta", timeout=0.35) as response:
+            if response.status != 200:
+                return None
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except (OSError, URLError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    raw = payload.get("state_dir") or payload.get("runguard") or ""
+    if not raw:
+        return None
+    try:
+        return Path(raw).expanduser().resolve()
+    except OSError:
+        return None
+
+
+def _dashboard_serves(state_dir: Path, port: int) -> bool:
+    """True only when a dashboard on ``port`` is bound to this state directory.
+
+    A bare ``/api/runs`` 200 is not enough: another project's dashboard may own
+    the port while this run writes ledgers elsewhere (operator watches empty UI).
+    """
+    serving = _dashboard_state_dir(port)
+    if serving is None:
+        return False
+    try:
+        return serving == state_dir.expanduser().resolve()
+    except OSError:
         return False
 
 
 def _start_dashboard(state_dir: Path, port: int) -> tuple[subprocess.Popen | None, bool]:
-    if _dashboard_responds(port):
+    state_dir = state_dir.expanduser().resolve()
+    if _dashboard_serves(state_dir, port):
         return None, True
+    # Port occupied by a different state dir — fail loud instead of attaching wrong.
+    other = _dashboard_state_dir(port)
+    if other is not None and other != state_dir:
+        raise SystemExit(
+            f"dashboard port {port} is already serving {other}, not {state_dir}.\n"
+            "Pick --port for a free port, or stop the other dashboard first."
+        )
+    # Port may be free, or an old server without /api/meta — probe runs only as a
+    # soft "something is up" signal; refuse attach without matching state.
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/runs", timeout=0.25) as response:
+            if response.status == 200 and other is None:
+                raise SystemExit(
+                    f"dashboard already responds on port {port} but does not expose "
+                    f"/api/meta state_dir; cannot verify it serves {state_dir}.\n"
+                    "Upgrade the dashboard process or use a free --port."
+                )
+    except SystemExit:
+        raise
+    except (OSError, URLError):
+        pass
     proc = subprocess.Popen(
         [sys.executable, str(skill_file("run_dashboard.py")), str(state_dir), "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
     )
-    for _ in range(30):
-        if _dashboard_responds(port):
+    for _ in range(40):
+        if _dashboard_serves(state_dir, port):
             return proc, False
         if proc.poll() is not None:
             break
@@ -335,7 +641,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             def pump_watcher() -> None:
                 assert watcher_proc is not None and watcher_proc.stdout is not None
                 for watcher_line in watcher_proc.stdout:
-                    _stream_watcher_line(watcher_line)
+                    _stream_watcher_line(watcher_line, state_dir=state_dir)
 
             watcher_thread = threading.Thread(target=pump_watcher, daemon=True)
             watcher_thread.start()
@@ -458,6 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""examples:
   observer-kit init .
   observer-kit dashboard .runguard
+  observer-kit poll .runguard --run runguard:my-run.jsonl
   observer-kit watch .runguard --all --follow
   observer-kit run --state-dir .runguard -- python3 workflow.py --dry-run --limit 10
   observer-kit test
@@ -555,6 +862,69 @@ single-session project-wide mode.
     reply.add_argument("--resolved", action="store_true", help="mark the note resolved")
     reply.add_argument("--text", required=True, help="reply text")
     reply.set_defaults(func=cmd_reply)
+
+    agent_status = sub.add_parser(
+        "agent-status",
+        help="mark agent presence: listening, responding, or idle",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  observer-kit agent-status .runguard --run runguard:my-run.jsonl --listening
+  observer-kit agent-status .runguard --run runguard:my-run.jsonl --responding
+  observer-kit agent-status .runguard --run runguard:my-run.jsonl --idle
+""",
+    )
+    agent_status.add_argument("state_dir", nargs="?", default=".runguard",
+                              help="ledger/state directory")
+    agent_status.add_argument("--run", required=True, help="run id shown in the dashboard")
+    mode = agent_status.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--listening", action="store_true",
+                      help="show that a poll is waiting for operator notes")
+    mode.add_argument("--responding", action="store_true",
+                      help="show the agent-responding spinner")
+    mode.add_argument("--idle", action="store_true",
+                      help="clear listening/responding presence")
+    agent_status.set_defaults(func=cmd_agent_status)
+
+    poll = sub.add_parser(
+        "poll",
+        help="long-poll for dashboard notes (AXI-style agent respond loop)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  # Leave running while the operator reviews the dashboard.
+  observer-kit poll .runguard --run runguard:scroll-demo.jsonl
+
+  # After acting, reply and listen again (Lavish --agent-reply pattern).
+  observer-kit poll .runguard --run runguard:scroll-demo.jsonl \\
+    --reply "Fixed the parser and reran the sample." --resolved
+
+  # Project-wide bridge for one long-lived agent session.
+  observer-kit poll .runguard --all
+
+Poll marks the run as listening so the dashboard shows agent presence. When a
+user note or control arrives it prints OBSERVER_CHAT_EVENT lines, flips to
+responding, and exits (unless --follow). Re-run poll after you reply. Notes are
+never lost if the poll times out — re-run with --include-existing if needed.
+""",
+    )
+    poll.add_argument("state_dir", nargs="?", default=".runguard",
+                      help="ledger/state directory")
+    poll.add_argument("--run", help="run id, e.g. runguard:my-run.jsonl")
+    poll.add_argument("--all", action="store_true",
+                      help="listen for notes on any run in this state dir")
+    poll.add_argument("--poll", type=float, default=1.0,
+                      help="poll interval in seconds (default 1)")
+    poll.add_argument("--timeout", type=float, default=0,
+                      help="seconds to wait; 0 = wait forever")
+    poll.add_argument("--include-existing", action="store_true",
+                      help="also surface notes already in chat.jsonl")
+    poll.add_argument("--follow", action="store_true",
+                      help="keep listening after each batch (stream)")
+    poll.add_argument("--reply", help="post an agent reply before listening")
+    poll.add_argument("--anchor", default="run",
+                      help="anchor for --reply (default run)")
+    poll.add_argument("--resolved", action="store_true",
+                      help="mark --reply as resolved")
+    poll.set_defaults(func=cmd_poll)
 
     run = sub.add_parser(
         "run",

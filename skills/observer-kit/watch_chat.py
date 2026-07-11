@@ -44,7 +44,11 @@ REGISTRY_LOCK = '.observer-watchers.registry.lock'
 
 
 def _timestamp():
-    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    """UTC RFC 3339 with nanoseconds — matches runguard ordering/chat watermarks."""
+    ns = time.time_ns()
+    secs, nsec = divmod(ns, 1_000_000_000)
+    base = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(secs))
+    return f'{base}.{nsec:09d}Z'
 
 
 def _load(path):

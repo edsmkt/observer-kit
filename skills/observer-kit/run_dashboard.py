@@ -37,15 +37,46 @@ except OSError as exc:
     raise RuntimeError(
         f'Observer dashboard asset is missing or unreadable: {DASHBOARD_JS_PATH}'
     ) from exc
-_arg_dir = next((a for a in sys.argv[1:] if not a.startswith('-')), None)
+def _parse_cli(argv):
+    """Parse ``run_dashboard.py [state_dir] [--port N]`` without treating flag values as paths."""
+    port = int(os.environ.get('OBSERVER_PORT', '8484'))
+    state_dir = None
+    args = list(argv[1:])
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == '--port':
+            if i + 1 >= len(args):
+                raise SystemExit('usage: run_dashboard.py [state_dir] [--port N]')
+            try:
+                port = int(args[i + 1])
+            except ValueError as exc:
+                raise SystemExit(f'invalid --port value: {args[i + 1]!r}') from exc
+            i += 2
+            continue
+        if arg.startswith('--port='):
+            try:
+                port = int(arg.split('=', 1)[1])
+            except ValueError as exc:
+                raise SystemExit(f'invalid --port value: {arg!r}') from exc
+            i += 1
+            continue
+        if arg.startswith('-'):
+            raise SystemExit(f'unknown option: {arg}')
+        if state_dir is None:
+            state_dir = arg
+            i += 1
+            continue
+        raise SystemExit(f'unexpected argument: {arg}')
+    return state_dir, port
+
+
+_arg_dir, PORT = _parse_cli(sys.argv)
 _runguard_dir = _arg_dir or os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(BASE, '.runguard')
 SOURCES = {
     'runguard': _runguard_dir,                          # runguard ledgers + locks
     'push': os.path.join(BASE, 'runs'),                 # per-run subdirs (optional)
 }
-PORT = int(os.environ.get('OBSERVER_PORT', '8484'))
-if '--port' in sys.argv:
-    PORT = int(sys.argv[sys.argv.index('--port') + 1])
 # Operator requests are separate from run ledgers. Notes wake the harness; control
 # requests are durable input for a script to acknowledge at a safe checkpoint.
 CHAT_FILE = os.path.join(SOURCES['runguard'], 'chat.jsonl')
@@ -54,12 +85,18 @@ ACTIVE_S = 120   # a file touched in the last 2 min counts as live
 EVENT_READ_BYTES = 512 * 1024
 LAST_EVENT_READ_BYTES = 128 * 1024
 _SUMMARY_CACHE = {}  # path -> {identity, offset, first, latest}
+_SUMMARY_LOCK = threading.Lock()
 _AUXILIARY_JSONL = {'chat.jsonl', 'controls.jsonl'}
 _CONTROL_LOCK = threading.Lock()
+_CHAT_LOCK = threading.Lock()
 
 
 def _timestamp():
-    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    """UTC RFC 3339 with nanoseconds — matches runguard ordering/chat watermarks."""
+    ns = time.time_ns()
+    secs, nsec = divmod(ns, 1_000_000_000)
+    base = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(secs))
+    return f'{base}.{nsec:09d}Z'
 
 
 def _summary_event(path):
@@ -70,49 +107,77 @@ def _summary_event(path):
     first sidebar pass scans complete JSONL lines; later polls continue from the
     cached byte offset, so active ledgers cost only their newly appended lines.
     """
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return {}
-    identity = (stat.st_dev, stat.st_ino)
-    cached = _SUMMARY_CACHE.get(path)
-    if not cached or cached['identity'] != identity or stat.st_size < cached['offset']:
-        cached = {'identity': identity, 'offset': 0, 'first': {}, 'latest': {}}
-    first, latest, offset = cached['first'], cached['latest'], cached['offset']
-    try:
-        with open(path, 'rb') as fh:
-            fh.seek(offset)
-            while True:
-                line = fh.readline()
-                if not line or not line.endswith(b'\n'):
-                    break  # retry an in-flight final line on the next sidebar poll
-                offset = fh.tell()
-                try:
-                    rec = json.loads(line.decode('utf-8', 'replace'))
-                except json.JSONDecodeError:
-                    continue
-                if not first:
-                    first = rec
-                if (rec.get('event') or rec.get('action')) == 'run_started':
-                    latest = rec
-    except OSError:
+    with _SUMMARY_LOCK:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return {}
+        identity = (stat.st_dev, stat.st_ino)
+        cached = _SUMMARY_CACHE.get(path)
+        if not cached or cached['identity'] != identity or stat.st_size < cached['offset']:
+            cached = {'identity': identity, 'offset': 0, 'first': {}, 'latest': {}}
+        first, latest, offset = cached['first'], cached['latest'], cached['offset']
+        try:
+            with open(path, 'rb') as fh:
+                fh.seek(offset)
+                while True:
+                    line = fh.readline()
+                    if not line or not line.endswith(b'\n'):
+                        break  # retry an in-flight final line on the next sidebar poll
+                    offset = fh.tell()
+                    try:
+                        rec = json.loads(line.decode('utf-8', 'replace'))
+                    except json.JSONDecodeError:
+                        continue
+                    if not first:
+                        first = rec
+                    if (rec.get('event') or rec.get('action')) == 'run_started':
+                        latest = rec
+        except OSError:
+            return latest or first
+        _SUMMARY_CACHE[path] = {
+            'identity': identity, 'offset': offset, 'first': first, 'latest': latest,
+        }
         return latest or first
-    _SUMMARY_CACHE[path] = {'identity': identity, 'offset': offset, 'first': first, 'latest': latest}
-    return latest or first
 
 
 def _last_event(path):
-    """Read the latest complete ledger event without loading a whole large run."""
+    """Read the latest complete ledger event without loading a whole large run.
+
+    Grows the tail window when the final JSONL line exceeds the default cap so a
+    finished run with a bulky terminal payload is not mistaken for still-live.
+    """
     try:
         size = os.path.getsize(path)
-        with open(path, 'rb') as f:
-            f.seek(max(0, size - LAST_EVENT_READ_BYTES))
-            chunk = f.read()
-        for line in reversed(chunk.decode('utf-8', 'replace').splitlines()):
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        if size <= 0:
+            return {}
+        window = min(size, LAST_EVENT_READ_BYTES)
+        while True:
+            with open(path, 'rb') as handle:
+                start = max(0, size - window)
+                handle.seek(start)
+                chunk = handle.read()
+            text = chunk.decode('utf-8', 'replace')
+            if start > 0:
+                cut = text.find('\n')
+                if cut < 0:
+                    # Mid-line seek: need a larger window (or the whole file).
+                    if window >= size:
+                        return {}
+                    window = size
+                    continue
+                text = text[cut + 1:]
+            for line in reversed(text.splitlines()):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+            if window >= size:
+                return {}
+            window = size
     except OSError:
         pass
     return {}
@@ -250,12 +315,29 @@ def list_runs():
                         continue
                     mtime = os.path.getmtime(p)
                     name, when = _nice_name(f, kind)
-                    runs.append({'id': f'{kind}:{f}', 'label': f, 'name': name, 'when': when,
-                                 'desc': _describe(summary), 'kind': kind,
+                    # Prefer operator-facing description over hashed scope names.
+                    desc = _describe(summary)
+                    pretty = (
+                        str(summary.get('description') or summary.get('name') or '').strip()
+                        or name
+                    )
+                    runs.append({'id': f'{kind}:{f}', 'label': f, 'name': pretty, 'when': when,
+                                 'desc': desc, 'kind': kind,
                                  'path': os.path.abspath(p),
                                  'mtime': mtime, 'live': _is_live_run(p, mtime, now)})
     runs.sort(key=lambda r: -r['mtime'])
     return runs
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        p = int(pid)
+        if p <= 0:
+            return False
+        os.kill(p, 0)
+        return True
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 def locks():
@@ -271,16 +353,57 @@ def locks():
                     pid = int(lock.get('pid', 0))
                     if pid <= 0:
                         continue
-                    try:
-                        os.kill(pid, 0)
-                        alive = True
-                    except Exception:
-                        alive = False
                     out.append({'scope': lock.get('scope') or f, 'pid': pid,
-                                'started': lock.get('started'), 'alive': alive})
+                                'started': lock.get('started'),
+                                'alive': _pid_alive(pid)})
                 except Exception:
                     pass
     return out
+
+
+def _heal_stale_listening(msgs: list) -> list:
+    """Clear agent_status=listening when the poll process PID is no longer alive.
+
+    Poll stamps pid on listening records. A SIGKILL/crash skips the idle write,
+    which left a permanent 'Agent listening' badge. Same liveness check as locks.
+    """
+    latest_by_run: dict = {}
+    for message in msgs:
+        if message.get('kind') != 'agent_status':
+            continue
+        run = str(message.get('run') or '')
+        latest_by_run[run] = message
+    for run, last in latest_by_run.items():
+        if last.get('status') != 'listening':
+            continue
+        pid = last.get('pid')
+        if pid is None:
+            continue  # legacy rows without pid — leave as-is
+        if _pid_alive(pid):
+            continue
+        idle = {
+            'ts': _timestamp(),
+            'run': run,
+            'anchor': 'run',
+            'author': 'system',
+            'kind': 'agent_status',
+            'status': 'idle',
+            'text': 'Agent idle (poller exited)',
+            'reason': 'stale_listening',
+            'stale_pid': pid,
+        }
+        try:
+            os.makedirs(os.path.dirname(CHAT_FILE) or '.', exist_ok=True)
+            with _CHAT_LOCK:
+                with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                    fh.write(json.dumps(idle, ensure_ascii=False) + '\n')
+                    fh.flush()
+                    os.fsync(fh.fileno())
+            msgs.append(idle)
+        except OSError:
+            # Still correct the response even if durable heal fails.
+            msgs.append(idle)
+    return msgs
 
 
 def _files_for(run_id):
@@ -289,17 +412,22 @@ def _files_for(run_id):
     if not primary:
         return []
     if kind == 'push':
-        d = os.path.dirname(primary)
-        return [p for p in (primary, os.path.join(d, 'api-calls.jsonl'))
-                if os.path.exists(p)]
+        # Only the events ledger is a business/record stream. api-calls.jsonl is a
+        # request log — injecting it made every HTTP line look like a Data-tab row.
+        return [primary] if os.path.exists(primary) else []
     if not _is_run_ledger(name):
         return []
     return [primary] if os.path.exists(primary) else []
 
 
 def read_events(run_id, offsets):
-    """Incremental tail: offsets = {path: byte_offset} from the client."""
+    """Incremental tail: offsets = {path: byte_offset} from the client.
+
+    Returns ``(events, new_offsets, reset)``. ``reset`` is true when a ledger
+    shrank or rotated under the client, so the UI must discard prior events.
+    """
     events, new_offsets = [], {}
+    reset = False
     for path in _files_for(run_id):
         try:
             size = os.path.getsize(path)
@@ -310,7 +438,8 @@ def read_events(run_id, offsets):
             off = max(0, off)
             read_limit = EVENT_READ_BYTES  # cap: fills in progressively across polls
             if size < off:
-                off = 0  # rotated/truncated
+                off = 0  # rotated/truncated — client must restart its buffer
+                reset = True
             with open(path, 'rb') as f:
                 f.seek(off)
                 chunk = f.read(read_limit)
@@ -335,15 +464,30 @@ def read_events(run_id, offsets):
             except json.JSONDecodeError:
                 pass
     events.sort(key=lambda e: e.get('ts') or '')
-    return events, new_offsets
+    return events, new_offsets, reset
 
 
 def has_more_events(run_id, offsets):
-    """Whether an incremental client has more complete ledger bytes to fetch."""
+    """Whether an incremental client has more *complete* ledger lines to fetch.
+
+    A trailing partial line (no ``\\n`` yet) does not count as more work, so the
+    browser poll loop will not spin at 0ms waiting on an unfinished write.
+    """
     for path in _files_for(run_id):
         try:
-            if int(offsets.get(path, 0)) < os.path.getsize(path):
-                return True
+            off = int(offsets.get(path, 0))
+            size = os.path.getsize(path)
+            if size <= off:
+                continue
+            with open(path, 'rb') as handle:
+                handle.seek(off)
+                # Only a complete line beyond the offset is fetchable progress.
+                probe = handle.read(min(size - off, EVENT_READ_BYTES))
+                if b'\n' in probe:
+                    return True
+                # If unread region is larger than the probe window, assume more.
+                if size - off > len(probe):
+                    return True
         except (AttributeError, TypeError, ValueError, OverflowError, OSError):
             continue
     return False
@@ -411,6 +555,15 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .bridgeNote b{color:var(--txt)}
 .bridgeLock{margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
 .bridgeActions{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.agentSpin{display:inline-block;width:12px;height:12px;border:2px solid #3a4654;border-top-color:var(--info);border-radius:50%;animation:agentSpin .7s linear infinite;vertical-align:-1px;margin-right:6px}
+@keyframes agentSpin{to{transform:rotate(360deg)}}
+.bridgeBadge.responding{background:#1a2f45;color:var(--info)}
+.bridgeBadge.listening{background:#1e2f28;color:var(--ok)}
+.agentListen{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);margin-right:6px;vertical-align:1px;box-shadow:0 0 0 0 rgba(110,200,140,.55);animation:agentListen 1.4s ease-out infinite}
+@keyframes agentListen{70%{box-shadow:0 0 0 8px rgba(110,200,140,0)}100%{box-shadow:0 0 0 0 rgba(110,200,140,0)}}
+.chatErr{color:var(--err);font-size:12px;margin-top:6px;min-height:16px}
+.newRowsHint{position:sticky;bottom:8px;left:50%;transform:translateX(-50%);z-index:6;display:none;margin:0 auto;width:max-content;max-width:90%;background:#1f3a55;color:#d7ebff;border:1px solid #2f5f8a;border-radius:99px;padding:6px 12px;font-size:12.5px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+.newRowsHint.show{display:inline-flex;align-items:center;gap:6px}
 .controlBtn{height:32px;display:inline-flex;align-items:center;gap:6px;padding:0 10px;background:#17202a;color:var(--dim);border:1px solid #334151;border-radius:7px;cursor:pointer;font-size:12px;font-weight:650}
 .controlBtn:hover{color:var(--txt);background:#273441;border-color:#4b6178}
 .controlBtn.warn:hover{color:var(--warn);border-color:#6a5525}
@@ -431,7 +584,7 @@ h3{margin:10px 0 8px;font-size:11px;color:var(--dim);text-transform:uppercase;le
 .card h4{margin:0 0 6px;font-size:14.5px}
 .card .row{padding:3px 0;color:var(--txt)}
 .card .row small{color:var(--dim)}
-.recordshell{height:calc(100vh - 214px);overflow:auto;border-radius:10px;background:var(--card);border:1px solid var(--line)}
+.recordshell{height:calc(100vh - 214px);overflow:auto;border-radius:10px;background:var(--card);border:1px solid var(--line);overflow-anchor:none}
 .recordshell .tablewrap{overflow:visible;max-height:none;border-radius:0}
 .tableTools{position:sticky;top:0;left:0;z-index:8;display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:8px 10px;background:#151c24;border-bottom:1px solid var(--line)}
 .filterToggle,.filterChip,.filterAction{background:#202a35;color:var(--txt);border:1px solid #344355;border-radius:7px;padding:5px 9px;cursor:pointer;font:12px -apple-system,"Segoe UI",sans-serif}
@@ -564,6 +717,7 @@ th[data-col]:hover,td[data-col]:hover{outline:1px solid #34506e;outline-offset:-
   <div id=chatpopHead></div>
   <div id=chatthread></div>
   <textarea id=chatinput placeholder="Tell the agent what to change here… (Enter to send, Shift+Enter = newline)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+  <div id=chatErr class=chatErr></div>
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
     <button class=chatbtn onclick="closeChat()">Close</button>
     <button id=chatSend class="chatbtn primary" onclick="sendChat()">Send to agent</button>
@@ -583,18 +737,46 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _json(self, obj):
+    def _json(self, obj, status: int = 200):
         body = json.dumps(obj).encode()
-        self.send_response(200)
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
+    def _csrf_ok(self) -> bool:
+        """Reject cross-site browser POSTs that could forge chat/controls.
+
+        Same-origin dashboard pages send Origin (or Referer) matching Host.
+        Non-browser clients (curl, acceptance tests) send neither and remain
+        allowed — the server is localhost-only, so the residual risk is low.
+        """
+        site = (self.headers.get('Sec-Fetch-Site') or '').strip().lower()
+        if site in {'cross-site'}:
+            return False
+        origin = (self.headers.get('Origin') or '').strip()
+        referer = (self.headers.get('Referer') or '').strip()
+        if not origin and not referer:
+            return True
+        from urllib.parse import urlparse
+        host = (self.headers.get('Host') or '').strip().lower()
+        if not host:
+            return False
+        candidate = origin or referer
+        try:
+            netloc = urlparse(candidate).netloc.lower()
+        except ValueError:
+            return False
+        return bool(netloc) and netloc == host
+
     def do_POST(self):
         from urllib.parse import urlparse
         u = urlparse(self.path)
+        if u.path in {'/api/chat', '/api/control'} and not self._csrf_ok():
+            self._json({'ok': False, 'error': 'cross-origin request blocked'}, status=403)
+            return
         length = int(self.headers.get('Content-Length') or 0)
         raw = self.rfile.read(length) if length else b''
         try:
@@ -602,15 +784,53 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             data = {}
         if u.path == '/api/chat':
-            text = (data.get('text') or '').strip()[:2000]
             run = (data.get('run') or '')[:200]
-            anchor = (data.get('anchor') or '')[:300]
+            anchor = (data.get('anchor') or 'run')[:300]
+            author = str(data.get('author') or 'user').strip().lower()[:32]
+            kind = str(data.get('kind') or '').strip()[:64]
+            status = str(data.get('status') or '').strip().lower()[:32]
+            text = (data.get('text') or '').strip()[:2000]
+            # Agent presence / typing indicator (not a user note).
+            if kind == 'agent_status' and run and status in {'listening', 'responding', 'idle'}:
+                os.makedirs(os.path.dirname(CHAT_FILE) or '.', exist_ok=True)
+                labels = {
+                    'listening': 'Agent is listening',
+                    'responding': 'Agent is responding',
+                    'idle': 'Agent idle',
+                }
+                rec = {
+                    'ts': _timestamp(), 'run': run, 'anchor': 'run',
+                    'author': 'system', 'kind': 'agent_status', 'status': status,
+                    'text': text or labels.get(status, f'Agent is {status}'),
+                }
+                with _CHAT_LOCK:
+                    with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                        fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                self._json({'ok': True, 'status': status})
+                return
+            if author not in {'user', 'agent', 'system'}:
+                author = 'user'
             if text and run and anchor:
-                os.makedirs(os.path.dirname(CHAT_FILE), exist_ok=True)
+                os.makedirs(os.path.dirname(CHAT_FILE) or '.', exist_ok=True)
                 rec = {'ts': _timestamp(), 'run': run,
-                       'anchor': anchor, 'author': 'user', 'text': text}
-                with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
-                    fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+                       'anchor': anchor, 'author': author, 'text': text}
+                if data.get('resolved') is not None:
+                    rec['resolved'] = bool(data.get('resolved'))
+                with _CHAT_LOCK:
+                    with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                        fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+                        # Agent replies clear the responding spinner.
+                        if author == 'agent':
+                            idle = {
+                                'ts': _timestamp(), 'run': run, 'anchor': 'run',
+                                'author': 'system', 'kind': 'agent_status', 'status': 'idle',
+                                'text': 'Agent idle',
+                            }
+                            fh.write(json.dumps(idle, ensure_ascii=False) + '\n')
+                        fh.flush()
+                        os.fsync(fh.fileno())
                 self._json({'ok': True})
             else:
                 self._json({'ok': False, 'error': 'run, anchor, text required'})
@@ -630,13 +850,18 @@ class Handler(BaseHTTPRequestHandler):
                            'kind': kind, 'note': note}
                     with open(CONTROL_FILE, 'a', encoding='utf-8') as fh:
                         fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
+                        fh.flush()
+                        os.fsync(fh.fileno())
                     if notify:
                         # Control transport wakes the watcher without posing as an operator note.
                         chat = {'ts': rec['ts'], 'run': run, 'anchor': 'run', 'author': 'system',
                                 'kind': 'control', 'control_id': rec['id'],
                                 'text': f"Control request: {kind.replace('_', ' ')}"}
-                        with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
-                            fh.write(json.dumps(chat, ensure_ascii=False) + '\n')
+                        with _CHAT_LOCK:
+                            with open(CHAT_FILE, 'a', encoding='utf-8') as fh:
+                                fh.write(json.dumps(chat, ensure_ascii=False) + '\n')
+                                fh.flush()
+                                os.fsync(fh.fileno())
                 self._json({'ok': True, 'control': rec})
             else:
                 self._json({'ok': False, 'error': 'run and a supported control kind required'})
@@ -663,6 +888,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif u.path == '/api/meta':
+            # Lets CLI attach only to a dashboard serving the expected state dir.
+            self._json({
+                'state_dir': os.path.abspath(SOURCES['runguard']),
+                'runguard': os.path.abspath(SOURCES['runguard']),
+                'push': os.path.abspath(SOURCES['push']),
+                'port': PORT,
+            })
         elif u.path == '/api/runs':
             self._json(list_runs())
         elif u.path == '/api/locks':
@@ -681,8 +914,13 @@ class Handler(BaseHTTPRequestHandler):
                             m = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        if not run or m.get('run') == run:
+                        # Project-wide poll presence uses run="all".
+                        if (not run or m.get('run') == run
+                                or (m.get('kind') == 'agent_status'
+                                    and m.get('run') == 'all')):
                             msgs.append(m)
+            # Drop permanent "listening" badges after a dead poll process.
+            msgs = _heal_stale_listening(msgs)
             self._json(msgs)
         elif u.path == '/api/control':
             q = parse_qs(u.query)
@@ -726,9 +964,10 @@ class Handler(BaseHTTPRequestHandler):
                 offsets = {}
             if not isinstance(offsets, dict):
                 offsets = {}
-            events, new_offsets = read_events(run_id, offsets)
+            events, new_offsets, reset = read_events(run_id, offsets)
             self._json({'events': events, 'offsets': new_offsets,
-                        'more': has_more_events(run_id, new_offsets)})
+                        'more': has_more_events(run_id, new_offsets),
+                        'reset': reset})
         else:
             self.send_response(404)
             self.end_headers()

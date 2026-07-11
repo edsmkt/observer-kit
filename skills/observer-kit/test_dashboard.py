@@ -5,7 +5,9 @@ import json
 import os
 import tempfile
 import threading
-from urllib.request import urlopen
+import time
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -74,6 +76,57 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
            dashboard._describe({'todo': 12}) == '12 items' and
            'contact-enrichment' not in dashboard.__doc__ and
            'enrich_runs' not in open(RUN_DASHBOARD, encoding='utf-8').read())
+
+        # CSRF: same-origin / non-browser clients allowed; foreign Origin blocked.
+        control_body = json.dumps({
+            'run': 'runguard:csrf-test.jsonl',
+            'kind': 'pause',
+            'note': 'csrf-check',
+            'notify': False,
+        }).encode()
+        same = Request(
+            f'http://{host}:{port}/api/control',
+            data=control_body,
+            headers={'Content-Type': 'application/json',
+                     'Origin': f'http://{host}:{port}'},
+            method='POST',
+        )
+        with urlopen(same, timeout=3) as response:
+            same_payload = json.loads(response.read().decode())
+        ok("same-origin control POST is accepted",
+           same_payload.get('ok') is True, str(same_payload))
+        foreign = Request(
+            f'http://{host}:{port}/api/control',
+            data=control_body,
+            headers={'Content-Type': 'application/json',
+                     'Origin': 'https://evil.example'},
+            method='POST',
+        )
+        foreign_blocked = False
+        foreign_body = ''
+        try:
+            urlopen(foreign, timeout=3)
+        except HTTPError as exc:
+            foreign_blocked = exc.code == 403
+            foreign_body = exc.read().decode()
+        ok("cross-origin control POST is rejected",
+           foreign_blocked and 'cross-origin' in foreign_body,
+           f"blocked={foreign_blocked} body={foreign_body[:120]!r}")
+        bare = Request(
+            f'http://{host}:{port}/api/control',
+            data=json.dumps({
+                'run': 'runguard:csrf-bare.jsonl',
+                'kind': 'pause',
+                'note': 'bare',
+                'notify': False,
+            }).encode(),
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        with urlopen(bare, timeout=3) as response:
+            bare_payload = json.loads(response.read().decode())
+        ok("non-browser control POST without Origin remains allowed",
+           bare_payload.get('ok') is True, str(bare_payload))
     finally:
         server.shutdown()
         server.server_close()
@@ -100,7 +153,7 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     offsets = {}
     seen = []
     for _ in range(10):
-        events, offsets = dashboard.read_events('runguard:large-run.jsonl', offsets)
+        events, offsets, _reset = dashboard.read_events('runguard:large-run.jsonl', offsets)
         seen.extend(e.get('key') for e in events if e.get('event') == 'record')
         if list(offsets.values())[0] == os.path.getsize(ledger):
             break
@@ -158,18 +211,18 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     second = b'.example"}\n'
     with open(partial, 'wb') as fh:
         fh.write(first)
-    partial_events, partial_offsets = dashboard.read_events('runguard:partial-run.jsonl', {})
+    partial_events, partial_offsets, _reset = dashboard.read_events('runguard:partial-run.jsonl', {})
     ok("partial JSONL line is deferred", not partial_events and list(partial_offsets.values())[0] == 0,
        str(partial_offsets))
     with open(partial, 'ab') as fh:
         fh.write(second)
-    partial_events, partial_offsets = dashboard.read_events('runguard:partial-run.jsonl', partial_offsets)
+    partial_events, partial_offsets, _reset = dashboard.read_events('runguard:partial-run.jsonl', partial_offsets)
     ok("completed partial JSONL line arrives on next poll",
        [e.get('key') for e in partial_events] == ['partial'], str(partial_events))
 
     bad_offsets = [{ledger: 'not-a-number'}, {ledger: -1}, []]
     for offset in bad_offsets:
-        offset_events, offset_result = dashboard.read_events('runguard:large-run.jsonl', offset)
+        offset_events, offset_result, _reset = dashboard.read_events('runguard:large-run.jsonl', offset)
         ok(f"invalid dashboard offset is reset safely ({type(offset).__name__})",
            bool(offset_events) and list(offset_result.values())[0] >= 0,
            str(offset_result))
@@ -211,9 +264,20 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
        'function controlStates()' in DASHBOARD_SOURCE and 'control_acknowledged' in DASHBOARD_SOURCE and
        "controlIcon(state.accepted?'accepted':kind)" in DASHBOARD_SOURCE)
     ok("run monitor separates messages from control transport and only exposes useful controls",
-       "filter(m=>m.kind!=='control')" in DASHBOARD_SOURCE and
+       ('function isChatMessage(m)' in DASHBOARD_SOURCE or "filter(m=>m.kind!=='control')" in DASHBOARD_SOURCE) and
        'function controlAvailability()' in DASHBOARD_SOURCE and
-       "summary.finished&&summary.dryRun" in DASHBOARD_SOURCE)
+       "summary.finished&&summary.dryRun" in DASHBOARD_SOURCE and
+       "kind==='agent_status'" in DASHBOARD_SOURCE and
+       'agentSpin' in DASHBOARD_SOURCE)
+    ok("dashboard shows listening presence alongside responding",
+       "agentListen" in DASHBOARD_SOURCE and
+       "Agent listening" in DASHBOARD_SOURCE and
+       "listening" in DASHBOARD_SOURCE and
+       "No agent is listening" in DASHBOARD_SOURCE)
+    ok("dashboard heals stale listening when the poll PID is dead",
+       '_heal_stale_listening' in open(RUN_DASHBOARD, encoding='utf-8').read() and
+       '_pid_alive' in open(RUN_DASHBOARD, encoding='utf-8').read() and
+       'stale_listening' in open(RUN_DASHBOARD, encoding='utf-8').read())
     ok("table inspection stays quiet until the operator Command-clicks to message the agent",
        "if(ev.metaKey||ev.ctrlKey){" in DASHBOARD_SOURCE and
        'Command/Ctrl-click = chat' in DASHBOARD_SOURCE and '[data-col]{cursor:default}' in DASHBOARD_SOURCE)
@@ -255,13 +319,14 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
        "case 'schema_observed'" in DASHBOARD_SOURCE and 'JSON field paths' in DASHBOARD_SOURCE)
     ok("live data updates preserve the operator's table position",
        'function captureTableScroll()' in DASHBOARD_SOURCE and 'function restoreTableScroll(state)' in DASHBOARD_SOURCE and
-       'const latestScroll=captureTableScroll();' in DASHBOARD_SOURCE and
+       '_tableScrollMem' in DASHBOARD_SOURCE and '_scrollRestoreGen' in DASHBOARD_SOURCE and
+       'do not clobber the operator viewport' in DASHBOARD_SOURCE and
        'content.replaceChildren(shell);' in DASHBOARD_SOURCE and
-       'restoreTableScroll(latestScroll);' in DASHBOARD_SOURCE and
+       'restoreTableScroll(savedScroll);' in DASHBOARD_SOURCE and
        'if(html!==null){' in DASHBOARD_SOURCE)
     ok("large table refreshes keep the current table until the replacement is complete",
-       DASHBOARD_SOURCE.index('const latestScroll=captureTableScroll();') < DASHBOARD_SOURCE.index('content.replaceChildren(shell);') and
-       DASHBOARD_SOURCE.index('content.replaceChildren(shell);') < DASHBOARD_SOURCE.index('restoreTableScroll(latestScroll);'))
+       DASHBOARD_SOURCE.index('const savedScroll={...(_tableScrollMem||{})};') < DASHBOARD_SOURCE.index('content.replaceChildren(shell);') and
+       DASHBOARD_SOURCE.index('content.replaceChildren(shell);') < DASHBOARD_SOURCE.index('restoreTableScroll(savedScroll);'))
     ok("record tables provide typed multi-column filters",
        "function filterKind(rows,column)" in DASHBOARD_SOURCE and 'function rowsMatchFilters(rows, table)' in DASHBOARD_SOURCE and
        'does not contain' in DASHBOARD_SOURCE and 'greater than or equal to' in DASHBOARD_SOURCE and
@@ -307,6 +372,73 @@ with tempfile.TemporaryDirectory(prefix='rgdash-') as state:
     ok("live flow updates preserve the operator's vertical position",
        "const flowScroll=view==='flow'?content.scrollTop:null;" in DASHBOARD_SOURCE and
        'if(viewScroll!==null&&viewScroll!==undefined)content.scrollTop=viewScroll;' in DASHBOARD_SOURCE)
+
+# CLI: flag values must not be mistaken for the state directory.
+state_dir, port = dashboard._parse_cli(['run_dashboard.py', '--port', '8485', 'mydir'])
+ok("dashboard CLI keeps --port values out of the state-dir slot",
+   state_dir == 'mydir' and port == 8485, f'{state_dir!r} {port!r}')
+state_dir, port = dashboard._parse_cli(['run_dashboard.py', 'mydir', '--port', '9001'])
+ok("dashboard CLI accepts state_dir before --port",
+   state_dir == 'mydir' and port == 9001, f'{state_dir!r} {port!r}')
+try:
+    dashboard._parse_cli(['run_dashboard.py', '--port'])
+    port_err = False
+except SystemExit:
+    port_err = True
+ok("dashboard CLI rejects a trailing --port without a value", port_err)
+
+# Oversized terminal events must still be visible to the liveness check.
+with tempfile.TemporaryDirectory(prefix='rgdash-last-') as last_state:
+    last_path = os.path.join(last_state, 'fat-terminal.jsonl')
+    with open(last_path, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'event': 'run_started', 'description': 'fat'}) + '\n')
+        fh.write(json.dumps({'event': 'record', 'table': 't', 'key': '1',
+                             'blob': 'y' * (200 * 1024)}) + '\n')
+        fh.write(json.dumps({'event': 'run_finished', 'status': 'success',
+                             'blob': 'z' * (200 * 1024)}) + '\n')
+    last = dashboard._last_event(last_path)
+    ok("last-event reader finds oversized terminal lines",
+       last.get('event') == 'run_finished' and last.get('status') == 'success',
+       str({k: last.get(k) for k in ('event', 'status')}))
+    ok("oversized terminal event clears the live indicator",
+       dashboard._is_live_run(last_path, os.path.getmtime(last_path), time.time()) is False)
+
+# Partial trailing bytes alone must not keep the client in a 0ms catch-up loop.
+with tempfile.TemporaryDirectory(prefix='rgdash-more-') as more_state:
+    more_path = os.path.join(more_state, 'tail.jsonl')
+    with open(more_path, 'wb') as fh:
+        fh.write(b'{"event":"run_started","description":"x"}\n')
+        fh.write(b'{"event":"record","table":"t","key":"1"')  # incomplete
+    dashboard.SOURCES['runguard'] = more_state
+    events, offs, _reset = dashboard.read_events('runguard:tail.jsonl', {})
+    ok("complete lines are delivered while a partial tail remains",
+       [e.get('event') for e in events] == ['run_started'], str(events))
+    ok("partial tail does not report more complete events",
+       not dashboard.has_more_events('runguard:tail.jsonl', offs),
+       f'offs={offs} more={dashboard.has_more_events("runguard:tail.jsonl", offs)}')
+
+# Truncation signals reset so the client can discard duplicated history.
+with tempfile.TemporaryDirectory(prefix='rgdash-reset-') as reset_state:
+    reset_path = os.path.join(reset_state, 'rotate.jsonl')
+    with open(reset_path, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'event': 'run_started', 'description': 'a'}) + '\n')
+        fh.write(json.dumps({'event': 'record', 'table': 't', 'key': '1'}) + '\n')
+    dashboard.SOURCES['runguard'] = reset_state
+    _ev, offs, reset_flag = dashboard.read_events('runguard:rotate.jsonl', {})
+    ok("initial read does not claim a ledger reset", reset_flag is False)
+    with open(reset_path, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'event': 'run_started', 'description': 'b'}) + '\n')
+    _ev, offs, reset_flag = dashboard.read_events('runguard:rotate.jsonl', offs)
+    ok("shrunken ledger reports reset for the client buffer", reset_flag is True, str(offs))
+
+ok("record window keeps continuous-lane business history across modes",
+   'Business rows accumulate across dry and full attempts' in dashboard.DASHBOARD_JS and
+   'function recordWindowStart()' in dashboard.DASHBOARD_JS)
+ok("live table rebuilds preserve operator scroll position",
+   '_tableScrollMem' in dashboard.DASHBOARD_JS and
+   '_scrollRestoreGen' in dashboard.DASHBOARD_JS and
+   'do not clobber the operator viewport' in dashboard.DASHBOARD_JS and
+   'overflow-anchor:none' in open(RUN_DASHBOARD, encoding='utf-8').read())
 
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

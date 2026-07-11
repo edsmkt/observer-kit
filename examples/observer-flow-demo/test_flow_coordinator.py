@@ -9,11 +9,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from flow_coordinator import (
+from demo_runtime import (
     CONDITION_OPS,
+    assert_dry_run_honest,
     build_plan_id,
     condition_value,
     implementation_identity,
+    invoke_node,
 )
 
 
@@ -52,9 +54,14 @@ def command(script: Path, state: Path, session: str, mode: str, *extra: str):
 
 
 def events(state: Path) -> list[dict]:
+    # Side-channel files live next to the run ledger (chat, controls, write
+    # receipt registries). Only the continuous run lane is the event stream.
+    skip = {"chat.jsonl", "controls.jsonl"}
     ledgers = [
         path for path in state.glob("*.jsonl")
-        if path.name not in {"chat.jsonl", "controls.jsonl"}
+        if path.name not in skip
+        and not path.name.endswith(".receipts.jsonl")
+        and ".receipt" not in path.name
     ]
     assert len(ledgers) == 1, ledgers
     return [json.loads(line) for line in ledgers[0].read_text(encoding="utf-8").splitlines()]
@@ -75,6 +82,67 @@ def latest_record_value(rows: list[dict], key: str, field: str):
 
 
 print("Testing Observer Flow demo coordinators\n")
+
+# Central dry-run honesty: sinks that claim a real mutation while dry fail closed.
+try:
+    assert_dry_run_honest(
+        {
+            "fields": {"sheet_status": "simulated append"},
+            "evidence": {"confirmation": "row-9", "mode": "full_run_simulation"},
+        },
+        dry_run=True,
+        node_id="prepare_sheet",
+    )
+    honest = False
+except RuntimeError:
+    honest = True
+ok("dry-run honesty rejects sinks that claim full-run delivery", honest)
+
+def _dishonest_sink(row, *, dry_run=False):
+    return {
+        "fields": {"sheet_status": "simulated append"},
+        "evidence": {"confirmation": "row-9", "mode": "full_run_simulation"},
+        "spend_units": 0,
+    }
+
+try:
+    invoke_node(
+        _dishonest_sink,
+        {"id": "prepare_sheet", "mode": "sink", "inputs": [], "side_effect": {"identity": "x"}},
+        {"domain": "example.test"},
+        dry_run=True,
+    )
+    gated = False
+except RuntimeError as exc:
+    gated = "dry-run sink" in str(exc) or "confirmation" in str(exc)
+ok("invoke_node fails closed on dishonest dry-run sink evidence", gated)
+
+# Cache-hit path must still call check_controls (operator pause/stop contract).
+demo_src = (HERE / "demo_runtime.py").read_text(encoding="utf-8")
+batch_src = BATCH.read_text(encoding="utf-8")
+# After the cache emit/return, checkpoint+check_controls must appear before the
+# next major branch (max_attempts / route) — not only on the fresh-execute tail.
+cache_block = demo_src.split("status=\"cached\"", 1)[-1].split("max_attempts is a ceiling", 1)[0]
+ok("cache-hit path still checkpoints and checks controls",
+   "check_controls(after_record=True)" in cache_block
+   and "checkpoint(" in cache_block)
+batch_cache = batch_src.split("reused durable batch member result", 1)[-1].split(
+    "route, reason = unit_route", 1,
+)[0]
+ok("batch cache-hit path still checkpoints and checks controls",
+   "check_controls(after_record=True)" in batch_cache
+   and "checkpoint(" in batch_cache)
+
+primary_source = PRIMARY.read_text(encoding="utf-8")
+batch_source = BATCH.read_text(encoding="utf-8")
+runtime_source = (HERE / "demo_runtime.py").read_text(encoding="utf-8")
+ok("scenario entrypoints share one demo runtime without importing each other",
+   "from demo_runtime import" in primary_source and
+   "from demo_runtime import" in batch_source and
+   "flow_coordinator" not in batch_source and
+   "batch_flow_coordinator" not in primary_source and
+   "flow_coordinator" not in runtime_source and
+   "batch_flow_coordinator" not in runtime_source)
 
 condition_cases = {
     "eq": ({"field": "value", "op": "eq", "value": 7}, True),
@@ -148,6 +216,13 @@ with tempfile.TemporaryDirectory(prefix="observer-flow-demo-") as tmp:
     ok("dry preview advances the same sink field during full-run simulation",
        latest_record_value(dry_events, "northstar-systems.test", "sheet_status") == "planned" and
        latest_record_value(full_events, "northstar-systems.test", "sheet_status") == "simulated append")
+    ok("central sink gate records dry-run write previews",
+       any(row.get("event") == "write_preview" for row in dry_events),
+       str({row.get("event") for row in dry_events}))
+    ok("central sink gate records full-run write intent and receipt",
+       any(row.get("event") == "write_intent" for row in full_events) and
+       any(row.get("event") == "write_receipt" for row in full_events),
+       str({row.get("event") for row in full_events}))
     ok("matching upstream work is cached while the mode-bound sink recomputes",
        any(row.get("event") == "flow_unit" and row.get("node_id") == "inspect_profile" and
            row.get("key") == "northstar-systems.test" and row.get("status") == "cached"

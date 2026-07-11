@@ -19,8 +19,8 @@ import json
 import os
 from pathlib import Path
 
-from runguard import (PendingWrite, input_snapshot, ledger, operation_key,
-                      start_observed_run, throttle)
+from runguard import (PendingWrite, RunPaused, input_snapshot, ledger,
+                      operation_key, start_observed_run, throttle)
 
 
 TABLES = {
@@ -186,6 +186,9 @@ def main() -> int:
         run.reconcile()
         run.success()
         return 0
+    except RunPaused:
+        # Deliberate pause already closed the run; do not mark it failed.
+        raise
     except Exception as exc:
         run.fail(exc)
         raise

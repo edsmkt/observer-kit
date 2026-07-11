@@ -15,7 +15,14 @@ Build every run around two separate guarantees:
 - **Liveness**: JSONL events advance while work happens, so the dashboard stays
   current.
 - **Durability**: completed results reach a re-readable sink at a durable
-  boundary, so a restart continues from saved work.
+  boundary, so a restart continues from saved work. Ledger rows, write receipts,
+  controls, and throttle claims are fsync'd after append; resume trusts that
+  disk boundary, not process memory.
+
+Dry-run honesty depends on routing every external mutation through
+`write_intent` / `write_receipt` (and optional `validate` / `allow_write`).
+Comparison or redo lanes use `RUNGUARD_SESSION` for a separate ledger **and**
+lock so they do not block each other on the same source.
 
 ## 1. Load The Right Context
 
@@ -202,9 +209,18 @@ observer-kit watch .runguard --all --follow
 observer-kit run --state-dir .runguard -- python3 workflow.py --full-run
 ```
 
+For interactive dashboard chat (operator note → agent reply), use the AXI-style
+poll loop so the UI shows **listening** while you wait:
+
+```bash
+observer-kit poll .runguard --run runguard:<lane>.jsonl
+observer-kit reply .runguard --run runguard:<lane>.jsonl --text "…" --resolved
+observer-kit poll .runguard --run runguard:<lane>.jsonl
+```
+
 Watcher ownership refuses overlapping bridges and parent-owned watchers exit with their CLI process. Use `observer-kit watch .runguard --status` for inspection.
 
-Treat watcher output as transport into the current agent session. Inspect the
+Treat watcher/poll output as transport into the current agent session. Inspect the
 script, JSONL, durable sink, and destination before replying or changing the
 run.
 

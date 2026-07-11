@@ -221,5 +221,16 @@ with tempfile.TemporaryDirectory() as tmp:
        proc.returncode == 1 and proc.stdout.startswith("INVALID "),
        proc.stdout + proc.stderr)
 
+# Shipped demo manifests must pass the same structural gate as skill examples.
+demo_root = HERE.parents[1] / "examples" / "observer-flow-demo"
+for name in ("pipeline.flow.json", "batch_pipeline.flow.json"):
+    path = demo_root / name
+    if not path.is_file():
+        ok(f"demo manifest present: {name}", False, str(path))
+        continue
+    demo = json.loads(path.read_text(encoding="utf-8"))
+    demo_errors = module.validate_manifest(demo)
+    ok(f"demo manifest validates: {name}", not demo_errors, str(demo_errors[:5]))
+
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)

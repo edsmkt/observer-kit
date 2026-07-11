@@ -47,23 +47,33 @@ import atexit
 import hashlib
 import fcntl
 import json
+import math
 import os
 import re
+import signal
 import sys
 import time
+import weakref
 
 _STATE_DIR = os.environ.get('RUNGUARD_STATE_DIR') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '.runguard')
 
-_held: dict[str, tuple[str, int]] = {}  # name -> (persistent lockfile path, fd)
+_held: dict[str, tuple[str, int, int]] = {}  # name -> (path, fd, refcount)
 _ledgers: dict[str, str] = {}
 _step_sequences: dict[str, int] = {}
+_open_runs: weakref.WeakSet = weakref.WeakSet()
+_signal_handlers_installed = False
 _SAFE_COMPONENT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 _CREDENTIAL_FIELD = re.compile(
     r'^(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|'
     r'password|passwd|secret|client[_-]?secret|cookie|set[_-]?cookie)$',
     re.IGNORECASE,
 )
+# Counter / checkpoint names that would clobber terminal ledger fields if merged.
+_RESERVED_RUN_FIELDS = frozenset({
+    'status', 'event', 'ts', 'attempt', 'dry_run', 'error', 'reason',
+    'checkpoints', 'name', 'source', 'control', 'control_id',
+})
 
 
 class RunPaused(RuntimeError):
@@ -78,9 +88,76 @@ class PendingWrite(RuntimeError):
     """A prior write intent has no receipt, so a duplicate write is unsafe."""
 
 
+def _install_signal_handlers() -> None:
+    """Close open runs on SIGTERM/SIGINT so ledgers get a terminal event.
+
+    Default signal termination skips ``atexit``. Install once per process; handlers
+    abandon every open ``ObservedRun``, then re-raise the signal.
+    """
+    global _signal_handlers_installed
+    if _signal_handlers_installed:
+        return
+    if os.environ.get('RUNGUARD_NO_SIGNAL_HANDLERS') == '1':
+        return
+
+    def _handle(signum, frame):  # noqa: ARG001 — signal API
+        for run in list(_open_runs):
+            try:
+                if not getattr(run, 'closed', True):
+                    run._abandon_if_open()
+            except Exception:
+                pass
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+        except (ValueError, OSError):
+            pass
+        try:
+            os.kill(os.getpid(), signum)
+        except OSError:
+            raise SystemExit(128 + int(signum))
+
+    for signum in (getattr(signal, 'SIGTERM', None), getattr(signal, 'SIGINT', None)):
+        if signum is None:
+            continue
+        try:
+            # Do not override custom handlers installed by the host harness.
+            current = signal.getsignal(signum)
+            if current in (signal.SIG_DFL, signal.default_int_handler):
+                signal.signal(signum, _handle)
+        except (ValueError, OSError):
+            # Not in main thread, or signals unsupported.
+            pass
+    _signal_handlers_installed = True
+
+
 def _timestamp() -> str:
-    """UTC RFC 3339 timestamp understood consistently by every dashboard."""
-    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    """UTC RFC 3339 timestamp with nanoseconds for stable ordering.
+
+    Second-only stamps made same-second chat and ledger events reorder or drop
+    under ``after_ts`` filters (for example ``wait_for_feedback``).
+    """
+    ns = time.time_ns()
+    secs, nsec = divmod(ns, 1_000_000_000)
+    base = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(secs))
+    return f'{base}.{nsec:09d}Z'
+
+
+def _ts_order_key(ts: object) -> str:
+    """Normalize RFC3339 stamps so second-only and nanosecond forms compare safely.
+
+    Lexicographic compare of ``…17Z`` vs ``…17.859Z`` is not chronological.
+    Pad or trim the fractional second to nine digits before ``after_ts`` filters.
+    """
+    raw = str(ts or '').strip()
+    if not raw:
+        return ''
+    body = raw[:-1] if raw.endswith('Z') else raw
+    if '.' not in body:
+        return f'{body}.000000000Z' if raw.endswith('Z') else f'{body}.000000000'
+    head, frac = body.split('.', 1)
+    frac = re.sub(r'\D', '', frac)[:9].ljust(9, '0')
+    suffix = 'Z' if raw.endswith('Z') else ''
+    return f'{head}.{frac}{suffix}'
 
 
 def _safe_component(value: object, fallback: str) -> str:
@@ -98,20 +175,50 @@ def _state_path(component: object, suffix: str, fallback: str) -> str:
     return os.path.join(_STATE_DIR, f'{_safe_component(component, fallback)}{suffix}')
 
 
+def _session_slug() -> str:
+    """Normalized RUNGUARD_SESSION value, or empty when using the default lane."""
+    session = os.environ.get('RUNGUARD_SESSION')
+    return _safe_component(session, 'session') if session else ''
+
+
+def _lane_cache_key(scope: str) -> str:
+    """Key ledger path cache by session + scope so multi-lane in-process use is safe."""
+    session = _session_slug()
+    return f'{session}\0{scope}' if session else scope
+
+
 def _lane_path(scope: str) -> str:
     """Return the continuous ledger path for a scope in the selected lane."""
-    if scope not in _ledgers:
+    cache_key = _lane_cache_key(scope)
+    if cache_key not in _ledgers:
         os.makedirs(_STATE_DIR, exist_ok=True)
-        session = os.environ.get('RUNGUARD_SESSION')
         scope_name = _safe_component(scope, 'scope')
-        session_name = _safe_component(session, 'session') if session else ''
+        session_name = _session_slug()
         name = f"{session_name}-{scope_name}.jsonl" if session_name else f"{scope_name}.jsonl"
-        _ledgers[scope] = os.path.join(_STATE_DIR, name)
-    return _ledgers[scope]
+        _ledgers[cache_key] = os.path.join(_STATE_DIR, name)
+    return _ledgers[cache_key]
+
+
+def _session_lock_name(scope: str) -> str:
+    """Lock name matches the ledger lane: session-scoped comparison/redo runs in parallel.
+
+    Without this, two RUNGUARD_SESSION values for the same source share one flock
+    while writing separate ledgers — contradicting the parallel-lane contract.
+    """
+    session_name = _session_slug()
+    if not session_name:
+        return scope
+    return f'{session_name}--{scope}'
 
 
 def _append_jsonl(path: str, record: dict) -> None:
-    """Append one complete JSON value. O_APPEND keeps concurrent small writes whole."""
+    """Append one complete JSON value and fsync it.
+
+    O_APPEND keeps concurrent small writes whole. fsync is required for the
+    durability contract: without it a crash can drop just-committed ledger rows
+    and write receipts, so resume may re-issue external writes (duplicates) or
+    hit PendingWrite when only the receipt was lost.
+    """
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     raw = (json.dumps(record, ensure_ascii=False, default=str, sort_keys=True) + '\n').encode('utf-8')
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -119,8 +226,43 @@ def _append_jsonl(path: str, record: dict) -> None:
         offset = 0
         while offset < len(raw):
             offset += os.write(fd, raw[offset:])
+        os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _looks_like_filesystem_path(raw: str) -> bool:
+    """True when ``raw`` is a path identity, not a sheet/table/export id."""
+    if raw.startswith('~') or raw.startswith('.') or os.path.isabs(raw):
+        return True
+    if os.sep in raw or (os.altsep and os.altsep in raw):
+        return True
+    # Windows drive path (C:\... or C:/...)
+    if len(raw) >= 3 and raw[1] == ':' and raw[2] in '\\/':
+        return True
+    return False
+
+
+def _source_identity(source: object) -> str:
+    """Stable source identity that does not flip when a path is created later.
+
+    Path-like values always go through ``realpath`` so:
+
+    - missing and existing paths share one identity (realpath still normalizes
+      existing parents, e.g. macOS ``/var`` → ``/private/var``);
+    - symlink aliases resolve to the same target when the path exists.
+
+    Non-path ids (sheet/table/export keys) are kept verbatim.
+    """
+    raw = str(source or '').strip()
+    if not raw:
+        raise ValueError('source must be a real source identity, not an empty label')
+    if not _looks_like_filesystem_path(raw):
+        return raw
+    try:
+        return os.path.realpath(os.path.expanduser(raw))
+    except OSError:
+        return os.path.abspath(os.path.expanduser(raw))
 
 
 def _iter_jsonl(path: str):
@@ -216,16 +358,26 @@ def input_snapshot(source: object, records: object | None = None,
     identity = str(source or '').strip()
     if not identity:
         raise ValueError('input snapshot needs a source identity')
-    result = {'source': os.path.realpath(identity) if os.path.exists(identity) else identity}
+    try:
+        result = {'source': _source_identity(identity)}
+    except ValueError:
+        result = {'source': identity}
     if version is not None:
         result['version'] = str(version)
-    if records is None and os.path.isfile(identity):
+    # Hash using the resolved path when possible so ~/ and relative forms still
+    # fingerprint file contents (not just the source name).
+    file_path = None
+    for candidate in (result.get('source'), os.path.expanduser(identity), identity):
+        if candidate and os.path.isfile(str(candidate)):
+            file_path = str(candidate)
+            break
+    if records is None and file_path:
         try:
-            stat = os.stat(identity)
+            stat = os.stat(file_path)
             result['bytes'] = stat.st_size
             digest = hashlib.sha256()
             rows = 0
-            with open(identity, 'rb') as fh:
+            with open(file_path, 'rb') as fh:
                 for chunk in iter(lambda: fh.read(1024 * 1024), b''):
                     digest.update(chunk)
                     rows += chunk.count(b'\n')
@@ -297,13 +449,92 @@ def source_scope(workflow: str, source: str) -> str:
     identifier. Two invocations with the same source get the same scope; a
     separate source gets a different scope and can run in parallel when it is
     provably disjoint.
+
+    Path identities stay stable if the file is created after the first call:
+    missing and existing paths share the same absolute form until a symlink
+    target is resolved when the path exists.
     """
-    raw = str(source or '').strip()
-    if not raw:
-        raise ValueError('source must be a real source identity, not an empty label')
-    identity = os.path.realpath(raw) if os.path.exists(raw) else raw
+    identity = _source_identity(source)
     digest = hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]
     return f'{_safe_component(workflow, "workflow")}-source-{digest}'
+
+
+def _restore_stop_requested(scope: str) -> bool:
+    """Re-arm stop-after-record after a crash mid-stop; clear after stop pause/finish.
+
+    ``control_acknowledged`` alone must not die with the process: if the operator
+    asked to stop and the worker died before ``run_paused``, the next attempt on
+    the same lane still honors that stop. A completed stop pause or successful
+    finish clears the arm so a deliberate resume can continue remaining work.
+    """
+    armed = False
+    for event in _iter_jsonl(_lane_path(scope)):
+        if (event.get('event') == 'control_acknowledged'
+                and event.get('control') == 'stop_after_record'):
+            armed = True
+            continue
+        if event.get('event') == 'run_paused':
+            # Prefer the structured control field; keep English-substring fallback
+            # for ledgers written before control= was stamped on stop pauses.
+            if event.get('control') == 'stop_after_record':
+                armed = False
+            else:
+                reason = str(event.get('reason') or '').lower()
+                if 'stop after' in reason or 'stop_after' in reason:
+                    armed = False
+            continue
+        # Any terminal close of the attempt clears stop arming (success, fail,
+        # abandon). Otherwise run.fail() would leave stop stuck on the next resume.
+        if event.get('event') in {'run_finished', 'run_failed', 'run_abandoned'}:
+            armed = False
+    return armed
+
+
+def _restore_unique_owners(scope: str) -> dict[str, str]:
+    """Rebuild marker -> record_key ownership for durable unique checks.
+
+    Same key may re-validate after resume (idempotent). A different key still
+    conflicts. Dead-lettered keys release their markers so a failed write can be
+    retried instead of permanently blocking the value.
+    """
+    owners: dict[str, str] = {}
+    for event in _iter_jsonl(_lane_path(scope)):
+        kind = event.get('event')
+        if kind == 'unique_reserved':
+            record_key = str(event.get('key') or event.get('record_key') or '')
+            for marker in event.get('markers') or []:
+                owners[str(marker)] = record_key
+            continue
+        if kind == 'unique_released':
+            for marker in event.get('markers') or []:
+                owners.pop(str(marker), None)
+            continue
+        if kind == 'dead_letter':
+            failed_key = str(event.get('record_key') or event.get('key') or '')
+            if failed_key:
+                owners = {marker: key for marker, key in owners.items()
+                          if key != failed_key}
+    return owners
+
+
+def _approve_control_cutoff(scope: str) -> str:
+    """Timestamp after which unacked full-run approvals remain valid.
+
+    Completing any non-dry attempt expires earlier approvals so one operator
+    click cannot authorize an unbounded series of full runs on the same lane.
+    """
+    cutoff = ''
+    for event in _iter_jsonl(_lane_path(scope)):
+        if event.get('event') not in {
+            'run_finished', 'run_failed', 'run_abandoned', 'run_paused',
+        }:
+            continue
+        if event.get('dry_run') is True:
+            continue
+        ts = str(event.get('ts') or '')
+        if ts and _ts_order_key(ts) >= _ts_order_key(cutoff):
+            cutoff = ts
+    return cutoff
 
 
 def _lockfile(name: str) -> str:
@@ -328,9 +559,15 @@ def _write_lock(fd: int, payload: dict) -> None:
 
 
 def acquire_lock(name: str) -> None:
-    """Exclusive per-scope advisory lock. Refuse while another process holds it."""
+    """Exclusive per-scope advisory lock. Refuse while another process holds it.
+
+    Same-process re-acquire is refcounted: nested ObservedRun holders on one
+    scope share one fd, and only the final ``release_lock`` unlocks.
+    """
     if name in _held:
-        return  # re-entrant within this process
+        path, fd, refs = _held[name]
+        _held[name] = (path, fd, refs + 1)
+        return
     path = _lockfile(name)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
@@ -352,15 +589,20 @@ def acquire_lock(name: str) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
         raise
-    _held[name] = (path, fd)
-    atexit.register(release_lock, name)
+    _held[name] = (path, fd, 1)
+    # Force-full unlock on process exit even if nested holders remain.
+    atexit.register(lambda n=name: release_lock(n, force=True))
 
 
-def release_lock(name: str) -> None:
-    held = _held.pop(name, None)
+def release_lock(name: str, force: bool = False) -> None:
+    held = _held.get(name)
     if not held:
         return
-    _path, fd = held
+    path, fd, refs = held
+    if not force and refs > 1:
+        _held[name] = (path, fd, refs - 1)
+        return
+    _held.pop(name, None)
     try:
         # Keep the inode in place. Removing a flocked lockfile creates a race in
         # which a second process can lock a new inode while this process holds old one.
@@ -382,8 +624,10 @@ def ledger(scope: str, event: str, **fields) -> None:
     Set RUNGUARD_SESSION=<slug> only to open a SEPARATE lane (a dated slug for a
     fresh weekly run, or a unique label for a clean A/B) → '<slug>-<scope>.jsonl'."""
     path = _lane_path(scope)
-    rec = {'ts': _timestamp(), 'event': event}
-    rec.update(fields)
+    # Reserved keys always win so a **row payload cannot clobber event identity.
+    rec = dict(fields)
+    rec['event'] = event
+    rec['ts'] = _timestamp()
     _append_jsonl(path, rec)
     if event == 'run_started':
         # Marker used by the CLI and harness hooks to create or reuse one watcher.
@@ -395,14 +639,14 @@ def ledger(scope: str, event: str, **fields) -> None:
 
 
 def ledger_path(scope: str) -> str | None:
-    return _ledgers.get(scope)
+    return _ledgers.get(_lane_cache_key(scope))
 
 
 def current_run_id(scope: str) -> str | None:
     """The dashboard run id for this scope's ledger ('runguard:<file>'). Pass it to
     read_chat/post_chat so chat lands on the same run the dashboard is showing.
     With RUNGUARD_SESSION pinned this stays stable across re-runs, so notes persist."""
-    p = _ledgers.get(scope)
+    p = _ledgers.get(_lane_cache_key(scope))
     return f'runguard:{os.path.basename(p)}' if p else None
 
 
@@ -477,7 +721,14 @@ def policy_errors(record: dict, policy: dict | None = None,
 
 def operation_key(record_key: object, destination: str,
                   transform_version: object | None = None) -> str:
-    """Stable idempotency key for one record, sink, and transform revision."""
+    """Stable idempotency key for one record, sink, and transform revision.
+
+    The external write registry is **per destination**, not per flow node.
+    Two nodes that share the same business key and write to the same
+    destination+transform_version are one sink write: the second
+    ``write_intent`` is an idempotent skip. Give each node a distinct
+    destination (or transform version) when they must both land.
+    """
     return _canonical_hash({'record_key': str(record_key), 'destination': destination,
                             'transform_version': transform_version or ''})
 
@@ -547,6 +798,13 @@ class ObservedStep:
                    step=self.name, status='done', dry_run=self.run.dry_run,
                    attempt=self.run.attempt, **self.fields)
             return False
+        # Intentional safety pause must not look like a failed mutation. Treating
+        # RunPaused as step_exception polluted Data/Attention and replay lists.
+        if exc_type is RunPaused or isinstance(exc, RunPaused):
+            ledger(self.run.scope, 'record', table=self.table, key=self.key,
+                   step=self.name, status='paused', reason=str(exc),
+                   dry_run=self.run.dry_run, attempt=self.run.attempt, **self.fields)
+            return False
         ledger(self.run.scope, 'record', table=self.table, key=self.key,
                step=self.name, status='failed', error=str(exc),
                dry_run=self.run.dry_run, attempt=self.run.attempt, **self.fields)
@@ -577,7 +835,9 @@ class ObservedRun:
             raise ValueError('pass source= for a source-derived scope, not both source and lock_key')
         self.source = source
         self.scope = source_scope(name, source) if source is not None else (lock_key or name)
-        self.lock_key = self.scope
+        # Locks follow the ledger lane (including RUNGUARD_SESSION) so comparison
+        # and parallel redo sessions do not hard-contend the same flock.
+        self.lock_key = _session_lock_name(self.scope)
         self.dry_run = bool(dry_run)
         self.description = description
         self.destination = destination
@@ -593,7 +853,7 @@ class ObservedRun:
         self.attempt = f'{os.getpid()}-{time.time_ns()}'
         self.counters: dict[str, int | float] = {}
         self.checkpoints: dict[str, object] = {}
-        self._seen_unique: set[str] = set()
+        self._unique_owners: dict[str, str] = {}
         self._seen_controls: set[str] = set()
         self._schema_profiles: dict[str, dict[str, set[str]]] = {}
         self._schema_samples: dict[str, int] = {}
@@ -609,28 +869,63 @@ class ObservedRun:
         ledger(self.scope, 'run_started', **started)
         self.run_id = current_run_id(self.scope)
         # A control is a one-shot request for this ledger lane. Persisted
-        # acknowledgements prevent a recovered/retried process from honoring an
-        # already-applied pause or approval again.
+        # acknowledgements prevent a recovered/retried process from re-applying
+        # pause/stop acks. stop_after_record stays armed across crash/resume until
+        # a stop pause or successful finish (see _restore_stop_requested).
+        # approve_full_run is NOT auto-acked here — see check_controls().
         self._seen_controls = {
             str(event['control_id']) for event in _iter_jsonl(_lane_path(self.scope))
             if event.get('event') == 'control_acknowledged' and event.get('control_id')
         }
+        self._unique_owners = _restore_unique_owners(self.scope)
+        self._approve_cutoff = _approve_control_cutoff(self.scope)
+        self.stop_requested = _restore_stop_requested(self.scope)
         self.manifest(snapshot=self.input_snapshot, destination=destination,
                       transform_version=transform_version, policy_version=policy_version,
                       script=script, config=config)
+        _open_runs.add(self)
+        _install_signal_handlers()
         atexit.register(self._abandon_if_open)
 
     def _event(self, event: str, **fields) -> None:
         ledger(self.scope, event, attempt=self.attempt, **fields)
+
+    def _mark_closed(self) -> None:
+        self.closed = True
+        try:
+            _open_runs.discard(self)
+        except Exception:
+            pass
+
+    def _terminal_payload(self, **fields) -> dict:
+        """Merge counters/checkpoints without clobbering lifecycle field names."""
+        payload = {
+            key: value for key, value in self.counters.items()
+            if key not in _RESERVED_RUN_FIELDS
+        }
+        payload.update({
+            key: value for key, value in fields.items()
+            if key not in _RESERVED_RUN_FIELDS
+        })
+        if self.checkpoints:
+            payload['checkpoints'] = dict(self.checkpoints)
+        # Surface reserved counter names under a nested map so metrics survive.
+        reserved_counts = {
+            key: value for key, value in self.counters.items()
+            if key in _RESERVED_RUN_FIELDS
+        }
+        if reserved_counts:
+            payload['counter_overrides'] = reserved_counts
+        return payload
 
     def _abandon_if_open(self) -> None:
         if self.closed:
             return
         self._event('run_abandoned', status='failed', dry_run=self.dry_run,
                     error='process exited before run.success() or run.fail()',
-                    **self.counters)
+                    **self._terminal_payload())
         release_lock(self.lock_key)
-        self.closed = True
+        self._mark_closed()
 
     def step(self, name: str, **fields) -> ObservedStep:
         """Log one visible unit of work as a generic dashboard record."""
@@ -647,28 +942,40 @@ class ObservedRun:
         self.checkpoints[name] = value
         self._event('checkpoint', checkpoint=name, value=value)
 
+    def _consume_pending_approvals(self, note: str) -> None:
+        """Spend unacked full-run approvals when a non-dry attempt ends."""
+        if self.dry_run:
+            return
+        for control in read_controls(self.run_id):
+            if control.get('kind') != 'approve_full_run':
+                continue
+            control_id = str(control.get('id') or _canonical_hash(control))
+            if control_id in self._seen_controls:
+                continue
+            control_ts = str(control.get('ts') or '')
+            if (self._approve_cutoff
+                    and control_ts
+                    and _ts_order_key(control_ts) <= _ts_order_key(self._approve_cutoff)):
+                continue
+            self.acknowledge_control(control, note=note)
+
     def success(self, **fields) -> None:
         if self.closed:
             return
-        payload = dict(fields)
-        payload.update(self.counters)
-        if self.checkpoints:
-            payload['checkpoints'] = dict(self.checkpoints)
-        self._event('run_finished', status='success', dry_run=self.dry_run, **payload)
+        self._consume_pending_approvals('consumed by completed full run')
+        self._event('run_finished', status='success', dry_run=self.dry_run,
+                    **self._terminal_payload(**fields))
         release_lock(self.lock_key)
-        self.closed = True
+        self._mark_closed()
 
     def fail(self, error: BaseException | str, **fields) -> None:
         if self.closed:
             return
-        payload = dict(fields)
-        payload.update(self.counters)
-        if self.checkpoints:
-            payload['checkpoints'] = dict(self.checkpoints)
+        self._consume_pending_approvals('consumed by failed full run')
         self._event('run_failed', status='failed', error=str(error),
-                    dry_run=self.dry_run, **payload)
+                    dry_run=self.dry_run, **self._terminal_payload(**fields))
         release_lock(self.lock_key)
-        self.closed = True
+        self._mark_closed()
 
     def manifest(self, snapshot: dict | None = None, destination: str | None = None,
                  transform_version: str | None = None, policy_version: str | None = None,
@@ -764,20 +1071,36 @@ class ObservedRun:
 
     def validate(self, record: dict, key: object, contract: dict,
                  table: str = 'records', on_error: str = 'pause') -> bool:
-        """Check a transformed record before a write; pause on schema drift by default."""
+        """Check a transformed record before a write; pause on schema drift by default.
+
+        ``unique`` ownership is durable: another record key cannot claim the same
+        value after resume. Re-validating the **same** key is idempotent so a
+        successful earlier attempt does not phantom-pause. Dead-lettered keys
+        release their markers so a failed write can be retried.
+        """
         errors = schema_errors(record, contract)
         new_unique = []
+        record_key = str(key)
         for field in contract.get('unique', []):
             value = record.get(field)
+            if value in (None, ''):
+                continue
             marker = _canonical_hash([table, field, value])
-            if value not in (None, '') and marker in self._seen_unique:
+            owner = self._unique_owners.get(marker)
+            if owner is not None and owner != record_key:
                 errors.append(f'duplicate unique field: {field}')
-            elif value not in (None, ''):
+            elif owner == record_key:
+                continue  # already reserved for this key (resume / re-validate)
+            else:
                 new_unique.append(marker)
         if not errors:
-            self._seen_unique.update(new_unique)
+            if new_unique:
+                for marker in new_unique:
+                    self._unique_owners[marker] = record_key
+                self._event('unique_reserved', table=table, key=record_key,
+                            markers=list(new_unique))
             return True
-        self._event('schema_violation', status='failed', key=str(key), table=table,
+        self._event('schema_violation', status='failed', key=record_key, table=table,
                     errors=errors)
         self.dead_letter(key, '; '.join(errors), table=table, reason='schema_violation')
         if on_error == 'pause':
@@ -805,19 +1128,38 @@ class ObservedRun:
             self._event('run_paused', status='paused', dry_run=self.dry_run,
                         reason=str(reason), **fields)
             release_lock(self.lock_key)
-            self.closed = True
+            self._mark_closed()
         raise RunPaused(str(reason))
 
     def dead_letter(self, record_key: object, error: object, retry: int = 0,
                     table: str = 'dead_letters', payload_ref: str | None = None,
+                    node_id: str | None = None,
                     **fields) -> None:
-        """Keep a failed record replayable without logging its full sensitive payload."""
+        """Keep a failed record replayable without logging its full sensitive payload.
+
+        Pass ``node_id`` (or leave it in ``fields``) when several nodes share the
+        same business key so ``replay_candidates`` can keep them distinct.
+        """
         payload = dict(fields)
-        payload.update({'record_key': str(record_key), 'error': str(error), 'retry': retry})
+        key = str(record_key)
+        payload.update({'record_key': key, 'error': str(error), 'retry': retry})
         if payload_ref:
             payload['payload_ref'] = payload_ref
+        # Prefer an explicit node_id; fall back to table when it is a node label.
+        if node_id is not None:
+            payload['node_id'] = str(node_id)
+        elif payload.get('node_id') is None and table and table not in {
+            'dead_letters', 'records', 'writes',
+        }:
+            payload.setdefault('node_id', str(table))
+        released = [marker for marker, owner in self._unique_owners.items() if owner == key]
+        if released:
+            for marker in released:
+                self._unique_owners.pop(marker, None)
+            self._event('unique_released', key=key, markers=released,
+                        reason='dead_letter')
         self._event('dead_letter', status='failed', **payload)
-        self._event('record', table='dead_letters', key=str(record_key), status='failed', **payload)
+        self._event('record', table='dead_letters', key=key, status='failed', **payload)
 
     def lineage(self, record_key: object, **fields) -> None:
         """Attach provenance (source URL/provider/reasoning/version) to one output row."""
@@ -846,35 +1188,83 @@ class ObservedRun:
         """Acknowledge dashboard requests at a script-defined safe point.
 
         ``pause`` acts immediately at the next check. ``stop_after_record`` is
-        remembered until a check made with ``after_record=True``. Approval is
-        returned to the harness/script; it never starts a full run by itself.
+        remembered until a check made with ``after_record=True``, and stays
+        armed across crash/resume until a stop pause or successful finish.
+
+        ``approve_full_run`` is returned every time while unacked; it is never
+        auto-acknowledged here so item-loop checks cannot burn the operator's
+        full-run approval. Call ``acknowledge_control`` when the harness acts
+        on approval. Approval never starts a full run by itself.
         """
         fresh = []
         for control in read_controls(self.run_id):
             control_id = str(control.get('id') or _canonical_hash(control))
+            kind = control.get('kind')
+            if kind == 'approve_full_run':
+                # Surface approval without consuming it. Scripts that only call
+                # check_controls() in the work loop must not silently burn it.
+                # Approvals older than the last completed full-run attempt are
+                # expired so one click cannot authorize unbounded full runs.
+                if control_id in self._seen_controls:
+                    continue
+                control_ts = str(control.get('ts') or '')
+                if (self._approve_cutoff
+                        and control_ts
+                        and _ts_order_key(control_ts) <= _ts_order_key(self._approve_cutoff)):
+                    continue
+                fresh.append(control)
+                continue
             if control_id in self._seen_controls:
                 continue
             self._seen_controls.add(control_id)
             fresh.append(control)
             self._event('control_acknowledged', control_id=control_id,
-                        control=control.get('kind'), note=control.get('note', ''))
-            if control.get('kind') == 'pause':
-                self.pause('operator requested pause')
-            if control.get('kind') == 'stop_after_record':
+                        control=kind, note=control.get('note', ''))
+            if kind == 'pause':
+                self.pause('operator requested pause', control='pause')
+            if kind == 'stop_after_record':
                 self.stop_requested = True
         if after_record and self.stop_requested:
-            self.pause('operator requested stop after current record')
+            self.pause('operator requested stop after current record',
+                       control='stop_after_record')
         return fresh
+
+    def acknowledge_control(self, control: dict | str, note: str = '') -> None:
+        """Persist that the harness acted on a control (especially full-run approval).
+
+        Pass the control dict returned by ``check_controls`` or its ``id``.
+        Safe to call more than once for the same id.
+        """
+        if isinstance(control, dict):
+            control_id = str(control.get('id') or _canonical_hash(control))
+            kind = control.get('kind') or 'approve_full_run'
+            note = note or str(control.get('note') or '')
+        else:
+            control_id = str(control)
+            kind = 'approve_full_run'
+        if control_id in self._seen_controls:
+            return
+        self._seen_controls.add(control_id)
+        self._event('control_acknowledged', control_id=control_id,
+                    control=kind, note=note)
 
     def write_intent(self, record_key: object, destination: str | None = None,
                      transform_version: str | None = None, payload: object | None = None,
-                     payload_ref: str | None = None, **fields) -> dict | None:
+                     payload_ref: str | None = None, node_id: str | None = None,
+                     **fields) -> dict | None:
         """Reserve one external write before calling a sink.
 
         A returned ticket is the sink idempotency key. Pass it to the provider
         when supported, then call ``write_receipt`` only after the provider or
         destination has confirmed the write. A prior pending ticket raises
         ``PendingWrite`` instead of guessing whether an interrupted call landed.
+
+        ``node_id`` is stamped on the ticket so receipts match multi-node
+        ``dead_letter`` identity in ``replay_candidates``. It does **not**
+        partition the destination write registry: registry identity is still
+        ``(record_key, destination, transform_version)`` via ``operation_key``.
+        Nodes that must both write the same key need distinct destinations (or
+        transform versions).
         """
         destination = destination or self.destination
         if not destination:
@@ -887,6 +1277,11 @@ class ObservedRun:
             ticket['payload_sha256'] = _canonical_hash(payload)
         if payload_ref:
             ticket['payload_ref'] = payload_ref
+        # Prefer explicit arg; allow node_id= in **fields without dropping it from the ticket.
+        if node_id is not None:
+            ticket['node_id'] = str(node_id)
+        elif fields.get('node_id') is not None:
+            ticket['node_id'] = str(fields['node_id'])
         if self.dry_run:
             self._event('write_preview', status='planned', **ticket, **fields)
             return {**ticket, 'dry_run': True}
@@ -909,6 +1304,7 @@ class ObservedRun:
                       outcome: object | None = None,
                       outcome_field: str | None = None,
                       record_fields: dict | None = None,
+                      node_id: str | None = None,
                       **fields) -> None:
         """Durably confirm an external write and optionally update its business row.
 
@@ -916,19 +1312,65 @@ class ObservedRun:
         the original entity. The destination name is the default outcome column;
         use ``outcome_field`` when the API/destination label should differ from
         the operator-facing column name.
+
+        ``node_id`` (or the ticket's ``node_id``) must match the dead_letter
+        identity when several nodes share a business key.
         """
         required = {'operation_key', 'record_key', 'destination'}
         if not required.issubset(ticket):
             raise ValueError('write_receipt needs the ticket returned by write_intent')
+        if node_id is not None:
+            fields = {**fields, 'node_id': str(node_id)}
+        elif ticket.get('node_id') is not None and 'node_id' not in fields:
+            fields = {**fields, 'node_id': str(ticket['node_id'])}
+        dry = bool(ticket.get('dry_run') or self.dry_run)
+        if dry:
+            # Dry runs must not mint written/verified ledger noise. Keep the
+            # planned preview surface and optional business-row projection.
+            real_write_outcomes = {
+                'written', 'verified', 'appended', 'inserted', 'upserted',
+                'pushed', 'created', 'updated', 'synced', 'success', 'succeeded',
+            }
+            if outcome is None or str(outcome).lower() in real_write_outcomes:
+                planned = 'planned'
+            else:
+                planned = outcome
+            payload = dict(fields)
+
+            payload.update(ticket)
+            # Explicit receipt node_id wins over a bare ticket field if both set.
+            if fields.get('node_id') is not None:
+                payload['node_id'] = fields['node_id']
+            payload.update({
+                'status': 'planned',
+                'destination_id': destination_id,
+                'dry_run': True,
+                'verified': bool(verified),
+            })
+            if lineage:
+                payload['lineage'] = lineage
+            self._event('write_preview', **payload)
+            if record_table:
+                row = dict(record_fields or {})
+                row.update({
+                    'table': record_table,
+                    'key': str(record_key if record_key is not None else ticket['record_key']),
+                    str(outcome_field or ticket['destination']): planned,
+                    'status': row.get('status') or 'preview',
+                    'dry_run': True,
+                })
+                self._event('record', **row)
+            return
         status = 'verified' if verified else 'written'
         receipt = {'ts': _timestamp(), 'state': status,
                    'operation_key': ticket['operation_key'],
                    'record_key': ticket['record_key'], 'destination': ticket['destination'],
                    'destination_id': destination_id, 'attempt': self.attempt}
-        if not ticket.get('dry_run'):
-            _record_receipt(ticket['destination'], receipt)
+        _record_receipt(ticket['destination'], receipt)
         payload = dict(fields)
         payload.update(ticket)
+        if fields.get('node_id') is not None:
+            payload['node_id'] = fields['node_id']
         payload.update({'status': status, 'destination_id': destination_id})
         if lineage:
             payload['lineage'] = lineage
@@ -943,16 +1385,38 @@ class ObservedRun:
             })
             self._event('record', **row)
 
+    @staticmethod
+    def _replay_identity(event: dict) -> tuple[str, str]:
+        """Stable (node, record) key so multi-node runs do not mask each other.
+
+        A write_receipt for the same business key from a different node must not
+        clear another node's dead_letter. Node falls back to empty string when
+        omitted (legacy single-node scripts).
+        """
+        node = str(
+            event.get('node_id')
+            or event.get('node')
+            or ''
+        )
+        record = str(event.get('record_key') or event.get('key') or '')
+        return (node, record)
+
     def replay_candidates(self, all_attempts: bool = True) -> list[dict]:
-        """Return failed records that have not later received a write receipt."""
-        failed, complete = {}, set()
+        """Return failed records that have not later received a matching receipt.
+
+        Matching is by ``(node_id, record_key)``. A later dead_letter for the same
+        pair replaces the earlier one; a write_receipt only clears the pair it
+        names (legacy receipts without node_id only clear bare-key failures).
+        """
+        failed: dict[tuple[str, str], dict] = {}
+        complete: set[tuple[str, str]] = set()
         for event in _iter_jsonl(_lane_path(self.scope)):
             if not all_attempts and event.get('attempt') != self.attempt:
                 continue
             if event.get('event') == 'dead_letter':
-                failed[str(event.get('record_key'))] = event
+                failed[self._replay_identity(event)] = event
             elif event.get('event') == 'write_receipt':
-                complete.add(str(event.get('record_key')))
+                complete.add(self._replay_identity(event))
         return [event for key, event in failed.items() if key not in complete]
 
     def reconcile(self, all_attempts: bool = False) -> dict:
@@ -972,9 +1436,10 @@ class ObservedRun:
                 skipped.add(op)
             elif event.get('event') == 'write_blocked':
                 blocked.add(op)
+        open_intents = set(intents) - set(receipts) - skipped
         result = {'intended': len(intents), 'written': len(receipts),
                   'verified': sum(1 for item in receipts.values() if item.get('status') == 'verified'),
-                  'pending': len(set(intents) - set(receipts)),
+                  'pending': len(open_intents),
                   'skipped': len(skipped), 'blocked': len(blocked),
                   'dead_letters': len(self.replay_candidates(all_attempts=all_attempts))}
         self._event('reconciliation', **result)
@@ -1010,6 +1475,9 @@ def throttle(resource: str, per_second: float) -> None:
     os.makedirs(_STATE_DIR, exist_ok=True)
     path = _state_path(resource, '.throttle', 'resource')
     interval = 1.0 / per_second
+    # Corrupt or clock-skewed throttle files can store a far-future grant and
+    # stall every caller. Cap how far ahead a slot may be claimed.
+    max_ahead = max(interval * 4.0, 30.0)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -1018,15 +1486,24 @@ def throttle(resource: str, per_second: float) -> None:
             stored = float(raw)
         except ValueError:
             stored = 0.0
-        grant = max(time.time(), stored)
+        now = time.time()
+        # nan/inf must not disable pacing (nan comparisons never trip the clamp).
+        if not math.isfinite(stored) or stored > now + max_ahead:
+            stored = now
+        grant = max(now, stored)
+        if not math.isfinite(grant):
+            grant = now
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
         os.write(fd, f'{grant + interval:.6f}'.encode('ascii'))
+        # Persist the schedule claim; without fsync a crash resets pacing to 0
+        # and recovering processes can burst past per_second.
+        os.fsync(fd)
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
     wait = grant - time.time()
-    if wait > 0:
+    if wait > 0 and math.isfinite(wait):
         time.sleep(wait)
 
 
@@ -1060,7 +1537,7 @@ def read_chat(run_id: str | None = None, after_ts: str | None = None,
                 continue
             if run_id and m.get('run') != run_id:
                 continue
-            if after_ts and (m.get('ts') or '') <= after_ts:
+            if after_ts and _ts_order_key(m.get('ts')) <= _ts_order_key(after_ts):
                 continue
             if author and m.get('author') != author:
                 continue
@@ -1087,8 +1564,10 @@ def wait_for_feedback(run_id: str, timeout: float = 600, poll: float = 2.0,
 
     This is the AXI-style review gate: run a SMALL SAMPLE, call this so the operator
     can inspect the sample in the dashboard and leave notes on cells/columns, then
-    adapt and run the full list. `since_ts` defaults to now, so only notes left
-    after the call count."""
+    adapt and run the full list. ``since_ts`` defaults to the instant before the
+    wait begins; notes must carry a strictly later timestamp (nanosecond stamps)
+    so a same-second reply is not dropped.
+    """
     if since_ts is None:
         since_ts = _timestamp()
     deadline = time.time() + timeout

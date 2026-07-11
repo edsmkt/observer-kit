@@ -293,6 +293,123 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
         final_status = wait_for_watch_status(state, project, ("no active watchers",))
         ok("all-run watcher child exits with its CLI parent",
            "no active watchers" in final_status, final_status)
+
+        # AXI-style poll: listening presence, deliver note, flip to responding.
+        poll_run = "runguard:poll-demo.jsonl"
+        poll_proc = subprocess.Popen(
+            [sys.executable, "-B", "-m", "observer_kit", "poll", str(state),
+             "--run", poll_run, "--poll", "0.1"],
+            cwd=project, env=CLI_ENV,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            listening = False
+            for _ in range(40):
+                chat_path = state / "chat.jsonl"
+                if chat_path.is_file():
+                    rows = [
+                        json.loads(line) for line in chat_path.read_text(encoding="utf-8").splitlines()
+                        if line.strip()
+                    ]
+                    if any(
+                        row.get("kind") == "agent_status"
+                        and row.get("status") == "listening"
+                        and row.get("run") == poll_run
+                        for row in rows
+                    ):
+                        listening = True
+                        break
+                time.sleep(0.05)
+            ok("poll marks the run as listening", listening)
+
+            # Post a user note while the poll is waiting.
+            with (state / "chat.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "ts": "2099-01-01T00:00:00.000000001Z",
+                    "run": poll_run,
+                    "anchor": "run",
+                    "author": "user",
+                    "text": "poll me please",
+                }) + "\n")
+            try:
+                out, err = poll_proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                poll_proc.kill()
+                out, err = poll_proc.communicate(timeout=3)
+            ok("poll delivers the note and exits",
+               poll_proc.returncode == 0
+               and "OBSERVER_CHAT_EVENT" in out
+               and "poll me please" in out,
+               out + err)
+            chat_rows = [
+                json.loads(line) for line in (state / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            statuses = [
+                row.get("status") for row in chat_rows
+                if row.get("kind") == "agent_status" and row.get("run") == poll_run
+            ]
+            ok("poll flips presence to responding after delivery",
+               statuses and statuses[-1] == "responding", str(statuses))
+
+            reply = cli(
+                "reply", str(state), "--run", poll_run,
+                "--text", "heard you", "--resolved", cwd=project,
+            )
+            ok("reply clears presence to idle",
+               reply.returncode == 0 and "replied to" in reply.stdout)
+            chat_rows = [
+                json.loads(line) for line in (state / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            statuses = [
+                row.get("status") for row in chat_rows
+                if row.get("kind") == "agent_status" and row.get("run") == poll_run
+            ]
+            ok("reply leaves agent status idle",
+               statuses and statuses[-1] == "idle", str(statuses))
+        finally:
+            if poll_proc.poll() is None:
+                poll_proc.terminate()
+                poll_proc.wait(timeout=3)
+
+        # poll --reply posts first, then listens (Lavish --agent-reply pattern).
+        reply_poll = cli(
+            "poll", str(state), "--run", "runguard:reply-poll.jsonl",
+            "--reply", "pre-reply", "--resolved", "--timeout", "0.3", "--poll", "0.1",
+            cwd=project, timeout=5,
+        )
+        ok("poll --reply writes the agent message before waiting",
+           reply_poll.returncode == 0 and "replied to" in reply_poll.stdout,
+           reply_poll.stdout + reply_poll.stderr)
+        reply_rows = [
+            json.loads(line) for line in (state / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        ok("poll --reply durable agent text is in chat",
+           any(row.get("author") == "agent" and row.get("text") == "pre-reply" for row in reply_rows))
+
+        # /api/meta exposes state_dir so attach refuses a foreign dashboard.
+        meta = api_json(port, "/api/meta")
+        ok("dashboard /api/meta reports the served state directory",
+           Path(meta.get("state_dir") or "").resolve() == state.resolve(),
+           str(meta))
+
+        other_state = Path(tempfile.mkdtemp(prefix="observer-other-state-"))
+        try:
+            # Port is already owned by `state`; attaching with a different dir must fail.
+            mismatch = cli(
+                "run", "--state-dir", str(other_state), "--dashboard", "--port", str(port),
+                "--", sys.executable, "-B", "-c", "print('should-not-run')",
+                cwd=project, timeout=10,
+            )
+            ok("run --dashboard refuses a port serving a different state dir",
+               mismatch.returncode != 0
+               and "already serving" in (mismatch.stdout + mismatch.stderr),
+               mismatch.stdout + mismatch.stderr)
+        finally:
+            import shutil
+            shutil.rmtree(other_state, ignore_errors=True)
     finally:
         dashboard.terminate()
         try:

@@ -4,6 +4,10 @@ This example runs a compact six-node coordinator over 30 synthetic account rows.
 It uses SQLite for durable node results and Observer Kit JSONL for the Data,
 Flow, Attention, Timeline, and Run info views.
 
+The two coordinator files are thin scenario entrypoints. `demo_runtime.py` owns
+their shared hashing, cache, persistence, routing, and dashboard event mechanics;
+it remains example code rather than a second production runtime.
+
 The graph inspects each synthetic profile, qualifies the account, sends each
 row down one of three branches, finds a contact for qualified rows, and prepares
 a simulated sheet row. One profile response and one contact lookup fail on

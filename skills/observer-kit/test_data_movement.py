@@ -150,6 +150,51 @@ ok('dead-letter replay candidates resolve after a matching receipt',
    [e.get('record_key') for e in before] == ['bad-row'] and not after and
    summary['intended'] == summary['written'] == 1 and summary['dead_letters'] == 0)
 
+# Multi-node: a write_receipt for the same business key must not mask another
+# node's dead_letter (flow demos share domain as the row key across nodes).
+run = runguard.start_observed_run('replay-nodes', source='replay-nodes', destination='crm')
+run.dead_letter('acme.com', 'contact lookup failed', node_id='find_contact')
+run.dead_letter('acme.com', 'sheet append failed', node_id='prepare_sheet')
+both = run.replay_candidates()
+ticket = run.write_intent('acme.com')
+run.write_receipt(ticket, destination_id='sheet-1', node_id='prepare_sheet')
+after_sheet = run.replay_candidates()
+ok('replay keeps distinct (node_id, record_key) pairs',
+   sorted(e.get('node_id') for e in both) == ['find_contact', 'prepare_sheet'])
+ok('write_receipt clears only the matching node pair',
+   [e.get('node_id') for e in after_sheet] == ['find_contact'],
+   str([e.get('node_id') for e in after_sheet]))
+run.success()
+
+# Integration-shaped path: validate dead_letter falls back to table=node id,
+# write_intent stamps node_id on the ticket, write_receipt inherits it — no
+# manual node_id= on the receipt call required. Use a unique destination so
+# prior tests' receipt registry does not idempotent-skip this intent.
+run = runguard.start_observed_run(
+    'replay-plumb', source='replay-plumb',
+    destination='synthetic-review-sheet-plumb', dry_run=False,
+)
+run.validate(
+    {'id': 'x'}, key='northstar.test',
+    contract={'required': ['missing_field']},
+    table='prepare_sheet', on_error='skip',
+)
+after_fail = run.replay_candidates()
+ticket = run.write_intent('northstar.test', node_id='prepare_sheet')
+ok('write_intent stamps node_id on the ticket',
+   bool(ticket) and ticket.get('node_id') == 'prepare_sheet', str(ticket))
+run.write_receipt(ticket, destination_id='ok')  # no explicit node_id=
+after_ok = run.replay_candidates()
+ok('demo-shaped dead_letter uses table as node_id',
+   after_fail and after_fail[0].get('node_id') == 'prepare_sheet'
+   and after_fail[0].get('record_key') == 'northstar.test',
+   str(after_fail))
+ok('ticket-stamped write_receipt clears same-node dead_letter without extra args',
+   not any(e.get('record_key') == 'northstar.test' and e.get('node_id') == 'prepare_sheet'
+           for e in after_ok),
+   str(after_ok))
+run.success()
+
 # Controls are input to a worker, not a dashboard-side kill command.
 run = runguard.start_observed_run('control-demo', source='control-source')
 runguard.post_control(run.run_id, 'stop_after_record')
@@ -167,8 +212,186 @@ ok('control requests wait for the worker safe point',
 
 run = runguard.start_observed_run('control-demo', source='control-source')
 replayed_controls = run.check_controls()
+ok('a recovered run after stop-pause does not re-list the control', not replayed_controls)
+ok('a recovered run after completed stop-pause is not still armed to stop',
+   run.stop_requested is False)
 run.success()
-ok('a recovered run does not honor an acknowledged control again', not replayed_controls)
+
+# Crash after stop is acked but before the stop pause: re-arm on resume.
+run = runguard.start_observed_run('control-stop-sticky', source='control-stop-sticky')
+runguard.post_control(run.run_id, 'stop_after_record')
+armed = run.check_controls()
+ok('stop_after_record arms stop_requested without pausing yet',
+   bool(armed) and run.stop_requested is True)
+run.closed = True
+runguard.release_lock(run.lock_key)
+
+run = runguard.start_observed_run('control-stop-sticky', source='control-stop-sticky')
+ok('stop stays armed across resume when pause never completed',
+   run.stop_requested is True and run.check_controls() == [])
+try:
+    run.check_controls(after_record=True)
+except runguard.RunPaused:
+    sticky_paused = True
+else:
+    sticky_paused = False
+ok('resumed stop still pauses at the next after_record boundary', sticky_paused)
+
+# Full-run approval must survive item-loop check_controls until the harness acts.
+run = runguard.start_observed_run('control-approve', source='control-approve', dry_run=True)
+runguard.post_control(run.run_id, 'approve_full_run', note='ship it')
+first = run.check_controls()
+second = run.check_controls()
+ok('approve_full_run is returned without being auto-acknowledged',
+   [c.get('kind') for c in first] == ['approve_full_run']
+   and [c.get('kind') for c in second] == ['approve_full_run']
+   and not any(e.get('event') == 'control_acknowledged' for e in events(run)))
+run.acknowledge_control(first[0])
+third = run.check_controls()
+ok('acknowledge_control consumes full-run approval once',
+   third == [] and any(e.get('event') == 'control_acknowledged'
+                       and e.get('control') == 'approve_full_run' for e in events(run)))
+run.success()
+
+# Nanosecond stamps keep chat watermarks and ledger order trustworthy.
+burst = []
+for i in range(20):
+    burst.append(runguard._timestamp())
+ok('timestamps are unique within a rapid burst', len(set(burst)) == len(burst))
+since = runguard._timestamp()
+runguard.post_chat('chat-watermark', 'run', 'operator note', author='user')
+notes = runguard.read_chat('chat-watermark', after_ts=since, author='user')
+ok('chat notes posted after a watermark are not dropped',
+   len(notes) == 1 and notes[0].get('text') == 'operator note')
+# Mixed second-only vs nanosecond stamps still compare chronologically.
+mixed_since = '2026-07-11T12:00:00.500000000Z'
+with open(os.path.join(STATE, 'chat.jsonl'), 'a', encoding='utf-8') as fh:
+    fh.write(json.dumps({
+        'ts': '2026-07-11T12:00:00Z', 'run': 'mixed-ts', 'anchor': 'run',
+        'author': 'user', 'text': 'before-watermark',
+    }) + '\n')
+    fh.write(json.dumps({
+        'ts': '2026-07-11T12:00:01Z', 'run': 'mixed-ts', 'anchor': 'run',
+        'author': 'user', 'text': 'after-watermark',
+    }) + '\n')
+mixed = runguard.read_chat('mixed-ts', after_ts=mixed_since, author='user')
+ok('mixed-precision chat watermarks keep later second-only notes',
+   [m.get('text') for m in mixed] == ['after-watermark'])
+
+# Pause inside step must not fail the row or open a dead letter.
+run = runguard.start_observed_run('pause-in-step', source='pause-in-step', dry_run=True)
+runguard.post_control(run.run_id, 'pause')
+try:
+    with run.step('enrich', table='records', key='row-1', label='Acme'):
+        run.check_controls()
+except runguard.RunPaused:
+    pause_in_step = True
+else:
+    pause_in_step = False
+pause_events = events(run)
+ok('pause inside step does not fail the row or dead-letter it',
+   pause_in_step
+   and any(e.get('event') == 'run_paused' for e in pause_events)
+   and any(e.get('event') == 'record' and e.get('key') == 'row-1'
+           and e.get('status') == 'paused' for e in pause_events)
+   and not any(e.get('event') == 'dead_letter' for e in pause_events)
+   and not any(e.get('event') == 'record' and e.get('key') == 'row-1'
+               and e.get('status') == 'failed' for e in pause_events)
+   and not any(e.get('record_key') == 'row-1' for e in run.replay_candidates()))
+
+# Path scopes stay stable when the file appears after the first call.
+pending_path = os.path.join(STATE, 'appears-later.csv')
+if os.path.exists(pending_path):
+    os.remove(pending_path)
+before = runguard.source_scope('import', pending_path)
+open(pending_path, 'w').write('id\n1\n')
+after = runguard.source_scope('import', pending_path)
+ok('source scope is stable when a path is created after first use', before == after)
+
+# Unique-field reservations survive crash/resume on the same lane.
+run = runguard.start_observed_run('unique-durability', source='unique-src', dry_run=True)
+ok('first unique value is accepted',
+   run.validate({'id': '1', 'email': 'a@x.com'}, '1',
+                {'unique': ['email']}, on_error='skip') is True)
+run.closed = True
+runguard.release_lock(run.lock_key)
+run = runguard.start_observed_run('unique-durability', source='unique-src', dry_run=True)
+ok('same key may re-validate its unique value after resume',
+   run.validate({'id': '1', 'email': 'a@x.com'}, '1',
+                {'unique': ['email']}, on_error='skip') is True)
+ok('unique values remain reserved against a different key after resume',
+   run.validate({'id': '2', 'email': 'a@x.com'}, '2',
+                {'unique': ['email']}, on_error='skip') is False)
+# Failed rows release markers so a retry can reclaim the value.
+run.dead_letter('1', 'downstream write failed')
+ok('dead-letter releases unique markers for retry',
+   run.validate({'id': '1', 'email': 'a@x.com'}, '1',
+                {'unique': ['email']}, on_error='skip') is True)
+run.success()
+
+# Dry-run receipts must not look like real writes.
+run = runguard.start_observed_run('dry-receipt', source='dry-receipt', dry_run=True,
+                                  destination='crm')
+ticket = run.write_intent('row-1', payload={'ok': True})
+run.write_receipt(ticket, destination_id='crm-1', verified=True,
+                  record_table='records', outcome='appended')
+dry_events = events(run)
+ok('dry-run write_receipt stays on the preview surface',
+   any(e.get('event') == 'write_preview' and e.get('status') == 'planned' for e in dry_events)
+   and not any(e.get('event') == 'write_receipt' for e in dry_events)
+   and not any(e.get('event') == 'record' and e.get('table') == 'writes'
+               and e.get('status') in {'written', 'verified'} for e in dry_events)
+   and any(e.get('event') == 'record' and e.get('table') == 'records'
+           and e.get('key') == 'row-1' and e.get('crm') == 'planned'
+           and e.get('status') == 'preview' for e in dry_events))
+run.success()
+
+# One full-run completion consumes pending operator approval.
+run = runguard.start_observed_run('approve-once', source='approve-once', dry_run=False)
+runguard.post_control(run.run_id, 'approve_full_run', note='go')
+# Stamp control in the past relative to a synthetic prior full-run finish by
+# completing this full run (consumes approval), then ensure a later run does not
+# still see it.
+ok('full-run sees pending approval before completion',
+   any(c.get('kind') == 'approve_full_run' for c in run.check_controls()))
+run.success()
+run = runguard.start_observed_run('approve-once', source='approve-once', dry_run=False)
+ok('completed full-run consumes approval for later attempts',
+   run.check_controls() == [])
+run.success()
+
+# Reserved counter names must not break terminal lifecycle fields.
+run = runguard.start_observed_run('counter-reserve', source='counter-src', dry_run=True)
+run.count('status', 3)
+run.count('processed', 1)
+run.success()
+finished = [e for e in events(run) if e.get('event') == 'run_finished']
+ok('run.count("status") does not clobber terminal status',
+   finished and finished[-1].get('status') == 'success'
+   and finished[-1].get('processed') == 1
+   and finished[-1].get('counter_overrides', {}).get('status') == 3)
+
+# stop_after_record must not stick after an explicit failure.
+run = runguard.start_observed_run('stop-fail', source='stop-fail', dry_run=False)
+runguard.post_control(run.run_id, 'stop_after_record')
+run.check_controls()
+ok('stop arms before fail', run.stop_requested is True)
+run.fail('forced')
+run = runguard.start_observed_run('stop-fail', source='stop-fail', dry_run=False)
+ok('stop is cleared after run.fail terminal', run.stop_requested is False)
+run.success()
+
+# Idempotent skips are not pending writes.
+run = runguard.start_observed_run('reconcile-skip', source='reconcile-skip', dry_run=False,
+                                  destination='crm')
+first = run.write_intent('k1', payload={'v': 1})
+run.write_receipt(first, destination_id='1', verified=True)
+second = run.write_intent('k1', payload={'v': 1})
+ok('duplicate write_intent is skipped', second is None)
+summary = run.reconcile()
+ok('reconcile does not count skipped ops as pending',
+   summary['skipped'] >= 1 and summary['pending'] == 0, str(summary))
+run.success()
 
 # Fixture simulation records a reproducible input but never needs live systems.
 fixture = os.path.join(STATE, 'simulation.jsonl')
