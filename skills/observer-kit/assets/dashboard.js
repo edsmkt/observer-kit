@@ -9,7 +9,9 @@ function contentViewportHeight(){return Math.max(260, content.clientHeight-28);}
 let autoscroll=true;
 // Persist table viewport across live re-renders. A single rAF after innerHTML
 // often runs before layout, so scrollHeight is still tiny and scrollTop clamps to 0.
+// _stickyViewport only updates on real operator scroll (non-zero, not mid-restore).
 let _tableScrollMem={contentTop:0,shellTop:0,shellLeft:0,key:null};
+let _stickyViewport={shellTop:0,shellLeft:0,key:null};
 let _scrollRestoreGen=0;
 content.addEventListener('scroll',()=>{autoscroll=content.scrollTop+content.clientHeight>content.scrollHeight-60});
 
@@ -21,13 +23,22 @@ function _visibleRowKey(shell){
   }
   return null;
 }
+function _rememberViewport(shell){
+  if(!shell||shell.dataset.restorePending==='1')return;
+  const top=shell.scrollTop, left=shell.scrollLeft;
+  // Never remember the post-rebuild zero clamp as the operator's place.
+  if(top<8 && left<8 && (_stickyViewport.shellTop>40||_stickyViewport.shellLeft>40))return;
+  if(top>8||left>8||(!_stickyViewport.shellTop&&!_stickyViewport.shellLeft)){
+    _stickyViewport={shellTop:top, shellLeft:left, key:_visibleRowKey(shell)};
+  }
+}
 function bindTableScrollHandlers(){
   const shell=content.querySelector('.recordshell');
   if(!shell||shell.dataset.scrollBound==='1')return;
   shell.dataset.scrollBound='1';
   shell.addEventListener('scroll',()=>{
-    // Ignore transient 0 values right after a rebuild until restore applies.
-    if(shell.scrollTop<8 && _tableScrollMem.shellTop>40 && shell.dataset.restorePending==='1')return;
+    if(shell.dataset.restorePending==='1')return;
+    _rememberViewport(shell);
     _tableScrollMem={
       contentTop:content.scrollTop,
       shellTop:shell.scrollTop,
@@ -39,63 +50,70 @@ function bindTableScrollHandlers(){
 function captureTableScroll(){
   const shell=content.querySelector('.recordshell');
   if(shell){
+    _rememberViewport(shell);
     let top=shell.scrollTop;
     let left=shell.scrollLeft;
     let key=_visibleRowKey(shell);
-    // Live polls can re-enter render() before the previous restore rAF runs. The
-    // fresh shell is still at scrollTop 0 — do not clobber the operator viewport.
-    if(top<8 && _tableScrollMem.shellTop>40){
-      top=_tableScrollMem.shellTop;
-      left=_tableScrollMem.shellLeft||0;
-      key=_tableScrollMem.key||key;
-    }
-    _tableScrollMem={contentTop:content.scrollTop, shellTop:top, shellLeft:left, key:key||_tableScrollMem.key||null};
+    // Prefer sticky operator viewport when the live shell is mid-rebuild at 0.
+    if(top<8 && _stickyViewport.shellTop>40)top=_stickyViewport.shellTop;
+    if(left<8 && _stickyViewport.shellLeft>40)left=_stickyViewport.shellLeft;
+    if(!key)key=_stickyViewport.key;
+    _tableScrollMem={contentTop:content.scrollTop, shellTop:top, shellLeft:left, key:key||null};
   }else{
     _tableScrollMem={..._tableScrollMem, contentTop:content.scrollTop};
   }
-  return {..._tableScrollMem};
+  return {
+    contentTop:_tableScrollMem.contentTop,
+    shellTop:_stickyViewport.shellTop||_tableScrollMem.shellTop,
+    shellLeft:_stickyViewport.shellLeft||_tableScrollMem.shellLeft,
+    key:_stickyViewport.key||_tableScrollMem.key,
+  };
 }
 function restoreTableScroll(state){
   if(!state)return;
+  // Merge sticky so a late capture of 0 never wipes the operator place.
+  const target={
+    contentTop:state.contentTop||0,
+    shellTop:Math.max(state.shellTop||0, _stickyViewport.shellTop||0),
+    shellLeft:Math.max(state.shellLeft||0, _stickyViewport.shellLeft||0),
+    key:state.key||_stickyViewport.key||null,
+  };
   const gen=++_scrollRestoreGen;
   const apply=()=>{
     if(gen!==_scrollRestoreGen)return; // a newer render owns the viewport
-    content.scrollTop=state.contentTop||0;
+    content.scrollTop=target.contentTop||0;
     const shell=content.querySelector('.recordshell');
     if(!shell)return;
     shell.dataset.restorePending='1';
     bindTableScrollHandlers();
     const maxTop=Math.max(0, shell.scrollHeight-shell.clientHeight);
     const maxLeft=Math.max(0, shell.scrollWidth-shell.clientWidth);
-    let top=typeof state.shellTop==='number'?state.shellTop:0;
-    let left=typeof state.shellLeft==='number'?state.shellLeft:0;
-    // Prefer the same row after live updates so appends don't yank the viewport.
-    if(state.key){
-      const want=String(state.key);
-      let tr=null;
-      for(const row of shell.querySelectorAll('tbody tr[data-key]')){
-        if(row.dataset.key===want){tr=row;break;}
-      }
-      if(tr){
-        const rowTop=tr.offsetTop, rowBottom=rowTop+tr.offsetHeight;
-        const stillInView=top<=rowTop+1 && top+shell.clientHeight>=rowBottom-1;
-        if(!stillInView)top=rowTop;
-      }
-    }
-    shell.scrollTop=Math.min(Math.max(0, top), maxTop);
-    shell.scrollLeft=Math.min(Math.max(0, left), maxLeft);
+    let top=target.shellTop||0;
+    let left=target.shellLeft||0;
+    shell.scrollTop=maxTop?Math.min(Math.max(0, top), maxTop):top;
+    shell.scrollLeft=maxLeft?Math.min(Math.max(0, left), maxLeft):left;
     _tableScrollMem={
       contentTop:content.scrollTop,
       shellTop:shell.scrollTop,
       shellLeft:shell.scrollLeft,
-      key:_visibleRowKey(shell)||state.key||null,
+      key:_visibleRowKey(shell)||target.key||null,
     };
+    // Keep sticky at the intended place even if this paint still clamped.
+    if(shell.scrollTop>8||shell.scrollLeft>8){
+      _stickyViewport={
+        shellTop:shell.scrollTop,
+        shellLeft:shell.scrollLeft,
+        key:_tableScrollMem.key,
+      };
+    }
     shell.dataset.restorePending='0';
   };
-  // Double rAF for layout, then a short timeout in case fonts/sticky headers reflow.
+  // Double rAF for layout, then short retries for reflow / late overflow.
   requestAnimationFrame(()=>requestAnimationFrame(()=>{
     apply();
-    setTimeout(apply, 50);
+    setTimeout(apply, 40);
+    setTimeout(apply, 100);
+    setTimeout(apply, 200);
   }));
 }
 

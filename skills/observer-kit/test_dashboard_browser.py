@@ -309,11 +309,26 @@ with tempfile.TemporaryDirectory(prefix="observer-browser-") as tmp:
                    before["top"] > 100 and before["left"] > 100, str(before))
                 append_event(ledger, record(80))
                 expect(rows).to_have_count(81, timeout=8_000)
-                page.wait_for_timeout(200)
-                after = shell.evaluate("element => ({top: element.scrollTop, left: element.scrollLeft})")
+                # Restore uses double rAF + delayed retries; wait for both axes.
+                page.wait_for_timeout(250)
+
+                def scroll_restored():
+                    after = shell.evaluate(
+                        "element => ({top: element.scrollTop, left: element.scrollLeft})"
+                    )
+                    return (
+                        abs(after["top"] - before["top"]) <= 3
+                        and abs(after["left"] - before["left"]) <= 3
+                    ), after
+
+                restored, after = False, {"top": None, "left": None}
+                for _ in range(20):
+                    restored, after = scroll_restored()
+                    if restored:
+                        break
+                    page.wait_for_timeout(50)
                 ok("live append preserves vertical and horizontal table position",
-                   abs(after["top"] - before["top"]) <= 3 and
-                   abs(after["left"] - before["left"]) <= 3,
+                   restored,
                    f"before={before}, after={after}")
                 quoted_run = page.locator("#runs .run").filter(has_text="quoted-'run")
                 expect(quoted_run).to_have_count(1)
