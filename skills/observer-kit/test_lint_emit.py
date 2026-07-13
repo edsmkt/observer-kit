@@ -466,6 +466,46 @@ def main():
 ok("silent discovery with a terminal planned dump is flagged",
    rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
 
+# 18j. Attribute-bound heartbeat alias (h.beat = run.progress).
+rc, out, err = run_lint("""
+from runguard import start_observed_run, ledger
+def build(run):
+    h = type('H', (), {})()
+    h.beat = run.progress
+    found = []
+    for page in source_pages:
+        found = found + list(fetch_page(page))
+        h.beat(phase='discover', done=len(found))
+    return found
+def main():
+    run = start_observed_run(
+        'scope', dry_run=True,
+        summary_metrics=[{'key': 'x', 'label': 'x'}])
+    for row in build(run):
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+    run.success()
+""")
+ok("attribute-aliased progress heartbeats with terminal dump are flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18k. Dict self-merge accumulation without subscript/update.
+rc, out, err = run_lint("""
+from runguard import ledger
+def build():
+    t = {}
+    for page in source_pages:
+        chunk = {row['id']: row for row in fetch_page(page)}
+        t = {**t, **chunk}
+    return t
+def main():
+    for key, row in build().items():
+        ledger('scope', 'record', table='companies', key=key,
+               destination='planned')
+""")
+ok("dict self-merge silent discovery with terminal dump is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
 # 19. Qualified ledger calls pass when progress and stable rows advance together.
 rc, out, err = run_lint("""
 import runguard

@@ -159,19 +159,44 @@ def _expr_is_heartbeat_method(value):
     return True
 
 
-def _subtree_has_heartbeat_call(root, functions, aliases):
+def _subtree_has_heartbeat_call(root, functions, aliases, attr_aliases=None):
     """True if any Call under root is a heartbeat (used for lambda bodies)."""
     for node in ast.walk(root):
         if isinstance(node, ast.Call) and _is_heartbeat_call(
-                node, aliases=aliases, functions=functions):
+                node, aliases=aliases, functions=functions,
+                attr_aliases=attr_aliases):
             return True
     return False
 
 
 def _heartbeat_aliases(tree):
-    """Names bound to heartbeat methods, getattr results, or heartbeat lambdas."""
+    """Return (name_aliases, attr_aliases) for heartbeat callables.
+
+    ``name_aliases``: ``beat = run.count`` then ``beat(...)``.
+    ``attr_aliases``: ``h.beat = run.progress`` then ``h.beat()`` as (recv, attr).
+    """
     functions = _function_defs(tree)
-    aliases = set()
+    name_aliases = set()
+    attr_aliases = set()  # (receiver_name, attr)
+
+    def _register_targets(targets, is_hb, aliases_for_lambda):
+        nonlocal name_aliases, attr_aliases
+        if not is_hb:
+            return False
+        grew = False
+        for target in targets:
+            if isinstance(target, ast.Name):
+                if target.id not in name_aliases:
+                    name_aliases.add(target.id)
+                    grew = True
+            elif (isinstance(target, ast.Attribute)
+                  and isinstance(target.value, ast.Name)):
+                key = (target.value.id, target.attr)
+                if key not in attr_aliases:
+                    attr_aliases.add(key)
+                    grew = True
+        return grew
+
     # Fixpoint: lambda bodies may call other aliases.
     for _ in range(4):
         grew = False
@@ -184,26 +209,22 @@ def _heartbeat_aliases(tree):
                 continue
             is_hb = _expr_is_heartbeat_method(value)
             if not is_hb and isinstance(value, ast.Lambda):
-                is_hb = _subtree_has_heartbeat_call(value, functions, aliases)
-            if not is_hb:
-                continue
-            for target in targets:
-                for name in _target_names(target):
-                    if name not in aliases:
-                        aliases.add(name)
-                        grew = True
+                is_hb = _subtree_has_heartbeat_call(
+                    value, functions, name_aliases, attr_aliases)
+            if _register_targets(targets, is_hb, name_aliases):
+                grew = True
         if not grew:
             break
-    return aliases
+    return name_aliases, attr_aliases
 
 
-def _is_heartbeat_call(node, aliases=None, functions=None):
+def _is_heartbeat_call(node, aliases=None, functions=None, attr_aliases=None):
     """Progress/metric/count signals that advance without filling data tables.
 
     Covers:
     - ledger('progress'|'metric', ...)
     - run.progress() / run.count() / run.metric() (ObservedRun-like receivers)
-    - getattr(run, 'count')('pages') and aliases of those methods
+    - getattr(run, 'count')('pages') and Name/Attribute aliases of those methods
     - lambda/Name aliases that call the above
     - unresolved helpers named like tick/emit_progress
 
@@ -212,6 +233,7 @@ def _is_heartbeat_call(node, aliases=None, functions=None):
     if not isinstance(node, ast.Call):
         return False
     aliases = aliases or set()
+    attr_aliases = attr_aliases or set()
     functions = functions or {}
     if _is_ledger_event_call(node, 'progress') or _is_ledger_event_call(node, 'metric'):
         return True
@@ -222,11 +244,16 @@ def _is_heartbeat_call(node, aliases=None, functions=None):
             if attr == 'count':
                 return _is_observed_receiver(recv)
             return True
-    if isinstance(node.func, ast.Attribute) and node.func.attr in HEARTBEAT_METHOD_ATTRS:
-        attr = node.func.attr
-        if attr in ('progress', 'metric'):
-            return True
-        return _is_observed_receiver(node.func.value)
+    if isinstance(node.func, ast.Attribute):
+        # h.beat() where h.beat was assigned run.progress
+        if isinstance(node.func.value, ast.Name):
+            if (node.func.value.id, node.func.attr) in attr_aliases:
+                return True
+        if node.func.attr in HEARTBEAT_METHOD_ATTRS:
+            attr = node.func.attr
+            if attr in ('progress', 'metric'):
+                return True
+            return _is_observed_receiver(node.func.value)
     if isinstance(node.func, ast.Name):
         name = node.func.id
         if name in aliases:
@@ -355,6 +382,22 @@ def _loop_record_kinds(loop, functions):
     return kinds
 
 
+def _name_referenced_in(expr, name):
+    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(expr))
+
+
+def _looks_like_counter_rebind(value, name):
+    """``n = n + 1`` style counters are not entity accumulation."""
+    if not isinstance(value, ast.BinOp) or not isinstance(value.op, (ast.Add, ast.Sub)):
+        return False
+    left, right = value.left, value.right
+    if isinstance(left, ast.Name) and left.id == name and isinstance(right, ast.Constant):
+        return isinstance(right.value, (int, float))
+    if isinstance(right, ast.Name) and right.id == name and isinstance(left, ast.Constant):
+        return isinstance(left.value, (int, float))
+    return False
+
+
 def _loop_produces_entities(loop):
     counter_names = {'progress', 'metrics', 'counts', 'counters', 'stats'}
     for node in _body_nodes(loop):
@@ -364,6 +407,17 @@ def _loop_produces_entities(loop):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if any(isinstance(target, ast.Subscript) for target in targets):
                 return True
+            # found = found + [...] / t = {**t, **chunk} — self-merging rebinds.
+            if isinstance(node, ast.Assign) and node.value is not None:
+                for target in targets:
+                    if not isinstance(target, ast.Name):
+                        continue
+                    if target.id in counter_names:
+                        continue
+                    if _looks_like_counter_rebind(node.value, target.id):
+                        continue
+                    if _name_referenced_in(node.value, target.id):
+                        return True
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in COLLECTION_MUTATIONS):
             roots = _root_names(node.func.value)
@@ -536,40 +590,49 @@ def _body_nodes(node):
         stack.extend(ast.iter_child_nodes(current))
 
 
-def _function_emits_event(fn, event, functions, seen=None, aliases=None):
+def _function_emits_event(fn, event, functions, seen=None, aliases=None,
+                          attr_aliases=None):
     seen = set(seen or ())
     if fn.name in seen:
         return False
     seen.add(fn.name)
     aliases = aliases or set()
+    attr_aliases = attr_aliases or set()
     for node in _body_nodes(fn):
         if not isinstance(node, ast.Call):
             continue
         if event == 'heartbeat':
-            if _is_heartbeat_call(node, aliases=aliases, functions=functions):
+            if _is_heartbeat_call(
+                    node, aliases=aliases, functions=functions,
+                    attr_aliases=attr_aliases):
                 return True
         elif _is_ledger_event_call(node, event):
             return True
         helper = functions.get(_called_name(node))
         if helper and _function_emits_event(
-                helper, event, functions, seen, aliases=aliases):
+                helper, event, functions, seen, aliases=aliases,
+                attr_aliases=attr_aliases):
             return True
     return False
 
 
-def _loop_emits_event(loop, event, functions, aliases=None):
+def _loop_emits_event(loop, event, functions, aliases=None, attr_aliases=None):
     aliases = aliases or set()
+    attr_aliases = attr_aliases or set()
     for node in _body_nodes(loop):
         if not isinstance(node, ast.Call):
             continue
         if event == 'heartbeat':
-            if _is_heartbeat_call(node, aliases=aliases, functions=functions):
+            if _is_heartbeat_call(
+                    node, aliases=aliases, functions=functions,
+                    attr_aliases=attr_aliases):
                 return True
         elif _is_ledger_event_call(node, event):
             return True
         helper = functions.get(_called_name(node))
         if helper and _function_emits_event(
-                helper, event, functions, aliases=aliases):
+                helper, event, functions, aliases=aliases,
+                attr_aliases=attr_aliases):
             return True
     return False
 
@@ -601,14 +664,15 @@ def _find_row_liveness_violations(tree, parents=None):
     """
     parents = parents or _parent_map(tree)
     functions = _function_defs(tree)
-    aliases = _heartbeat_aliases(tree)
+    aliases, attr_aliases = _heartbeat_aliases(tree)
     violations = []
     for loop in ast.walk(tree):
         if not isinstance(loop, LOOP_TYPES):
             continue
         kinds = _loop_record_kinds(loop, functions)
         has_heartbeat = _loop_emits_event(
-            loop, 'heartbeat', functions, aliases=aliases)
+            loop, 'heartbeat', functions, aliases=aliases,
+            attr_aliases=attr_aliases)
         produces = _loop_produces_entities(loop)
         if has_heartbeat:
             if not kinds:
