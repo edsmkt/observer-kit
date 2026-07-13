@@ -404,6 +404,68 @@ def main():
 ok("list.count does not false-positive as a heartbeat",
    rc == 0, f"rc={rc}; {out[:280]}")
 
+# 18g. getattr(run, 'count') must not hide a terminal planned dump.
+rc, out, err = run_lint("""
+from runguard import start_observed_run, ledger
+def build_targets(run):
+    targets = {}
+    for page in source_pages:
+        for row in fetch_page(page):
+            targets[row['id']] = row
+        getattr(run, 'count')('pages_read')
+    return targets
+def main():
+    run = start_observed_run(
+        'scope', dry_run=True,
+        summary_metrics=[{'key': 'pages_read', 'label': 'pages'}])
+    for row in build_targets(run).values():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+    run.success()
+""")
+ok("getattr count heartbeats with a terminal planned dump are flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18h. Lambda-bound run.progress must not hide a terminal planned dump.
+rc, out, err = run_lint("""
+from runguard import start_observed_run, ledger
+def build_targets(run):
+    refresh = lambda: run.progress(phase='discover', done=1)
+    targets = {}
+    for page in source_pages:
+        for row in fetch_page(page):
+            targets[row['id']] = row
+        refresh()
+    return targets
+def main():
+    run = start_observed_run(
+        'scope', dry_run=True,
+        summary_metrics=[{'key': 'x', 'label': 'x'}])
+    for row in build_targets(run).values():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+    run.success()
+""")
+ok("lambda-bound progress heartbeats with a terminal planned dump are flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18i. Silent discovery (no heartbeats) then terminal planned dump is flagged.
+rc, out, err = run_lint("""
+from runguard import ledger
+def build_targets():
+    targets = {}
+    for page in source_pages:
+        for row in fetch_page(page):
+            targets[row['id']] = row
+    return targets
+def main():
+    for row in build_targets().values():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("silent discovery with a terminal planned dump is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
 # 19. Qualified ledger calls pass when progress and stable rows advance together.
 rc, out, err = run_lint("""
 import runguard

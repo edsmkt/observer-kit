@@ -130,36 +130,84 @@ def _is_observed_receiver(node):
     return False
 
 
+def _getattr_heartbeat_parts(call):
+    """If ``call`` is ``getattr(recv, 'progress'|'count'|'metric')``, return parts."""
+    if not isinstance(call, ast.Call) or _called_name(call) != 'getattr':
+        return None, None
+    if len(call.args) < 2:
+        return None, None
+    attr_node = call.args[1]
+    if not isinstance(attr_node, ast.Constant) or not isinstance(attr_node.value, str):
+        return None, None
+    attr = attr_node.value
+    if attr not in HEARTBEAT_METHOD_ATTRS:
+        return None, None
+    return call.args[0], attr
+
+
+def _expr_is_heartbeat_method(value):
+    """True when value is run.count / run.progress / getattr(run, 'count') etc."""
+    if isinstance(value, ast.Attribute) and value.attr in HEARTBEAT_METHOD_ATTRS:
+        if value.attr == 'count':
+            return _is_observed_receiver(value.value)
+        return True
+    recv, attr = _getattr_heartbeat_parts(value) if isinstance(value, ast.Call) else (None, None)
+    if attr is None:
+        return False
+    if attr == 'count':
+        return _is_observed_receiver(recv)
+    return True
+
+
+def _subtree_has_heartbeat_call(root, functions, aliases):
+    """True if any Call under root is a heartbeat (used for lambda bodies)."""
+    for node in ast.walk(root):
+        if isinstance(node, ast.Call) and _is_heartbeat_call(
+                node, aliases=aliases, functions=functions):
+            return True
+    return False
+
+
 def _heartbeat_aliases(tree):
-    """Names bound to run.count / run.progress / similar method references."""
+    """Names bound to heartbeat methods, getattr results, or heartbeat lambdas."""
+    functions = _function_defs(tree)
     aliases = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            value, targets = node.value, node.targets
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            value, targets = node.value, [node.target]
-        else:
-            continue
-        if not (isinstance(value, ast.Attribute) and value.attr in HEARTBEAT_METHOD_ATTRS):
-            continue
-        if value.attr == 'count' and not _is_observed_receiver(value.value):
-            # Do not alias list/str .count into heartbeat tracking.
-            continue
-        if value.attr in ('progress', 'metric') or _is_observed_receiver(value.value):
+    # Fixpoint: lambda bodies may call other aliases.
+    for _ in range(4):
+        grew = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                value, targets = node.value, node.targets
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                value, targets = node.value, [node.target]
+            else:
+                continue
+            is_hb = _expr_is_heartbeat_method(value)
+            if not is_hb and isinstance(value, ast.Lambda):
+                is_hb = _subtree_has_heartbeat_call(value, functions, aliases)
+            if not is_hb:
+                continue
             for target in targets:
-                aliases.update(_target_names(target))
+                for name in _target_names(target):
+                    if name not in aliases:
+                        aliases.add(name)
+                        grew = True
+        if not grew:
+            break
     return aliases
 
 
 def _is_heartbeat_call(node, aliases=None, functions=None):
     """Progress/metric/count signals that advance without filling data tables.
 
-    Also treats (1) aliases bound to those methods and (2) unresolved Name calls
-    whose identifier looks like a heartbeat helper, so imported tick()/progress
-    wrappers do not false-negative ROW LIVENESS checks.
+    Covers:
+    - ledger('progress'|'metric', ...)
+    - run.progress() / run.count() / run.metric() (ObservedRun-like receivers)
+    - getattr(run, 'count')('pages') and aliases of those methods
+    - lambda/Name aliases that call the above
+    - unresolved helpers named like tick/emit_progress
 
-    ``list.count`` / ``str.count`` are excluded so ordinary collection helpers
-    do not trip ROW LIVENESS (F2 residual).
+    ``list.count`` / ``str.count`` are excluded.
     """
     if not isinstance(node, ast.Call):
         return False
@@ -167,10 +215,15 @@ def _is_heartbeat_call(node, aliases=None, functions=None):
     functions = functions or {}
     if _is_ledger_event_call(node, 'progress') or _is_ledger_event_call(node, 'metric'):
         return True
+    # getattr(run, 'count')('pages') — outer call, func is the getattr(...) call.
+    if isinstance(node.func, ast.Call):
+        recv, attr = _getattr_heartbeat_parts(node.func)
+        if attr is not None:
+            if attr == 'count':
+                return _is_observed_receiver(recv)
+            return True
     if isinstance(node.func, ast.Attribute) and node.func.attr in HEARTBEAT_METHOD_ATTRS:
         attr = node.func.attr
-        # progress/metric are Observer Kit dashboard events; count collides with
-        # list/str .count(), so require an ObservedRun-like receiver.
         if attr in ('progress', 'metric'):
             return True
         return _is_observed_receiver(node.func.value)
@@ -393,7 +446,7 @@ def analyze(path):
     # Heartbeats (progress/metric/count) are a companion surface. Repeated
     # heartbeats from a slow loop must advance at least one stable entity or
     # phase row in that same loop path — not only a terminal record dump.
-    row_liveness_violations = _find_row_liveness_violations(tree)
+    row_liveness_violations = _find_row_liveness_violations(tree, parents)
     summary_violations = _summary_metric_violations(tree)
     limit_violations = _sample_limit_violations(tree)
     canary_violations = _canary_visibility_violations(tree)
@@ -521,28 +574,53 @@ def _loop_emits_event(loop, event, functions, aliases=None):
     return False
 
 
-def _find_row_liveness_violations(tree):
-    """Flag slow loops that stream heartbeats without advancing the data table.
+def _ancestor_loop_has_record_kinds(loop, parents, functions):
+    """True when an enclosing loop already streams record rows (nested pagination)."""
+    current = parents.get(loop)
+    while current is not None:
+        if isinstance(current, LOOP_TYPES):
+            if _loop_record_kinds(current, functions):
+                return True
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            break
+        current = parents.get(current)
+    return False
 
-    Heartbeats include ledger('progress'), ledger('metric'), run.progress(),
-    run.count(), aliases of those methods, and unresolved helpers named like
-    tick/emit_progress. Progress-only discovery with a terminal planned-record
-    dump is the production failure mode this catches.
+
+def _find_row_liveness_violations(tree, parents=None):
+    """Flag slow loops that leave the Data table empty until a later dump.
+
+    Triggers when a loop:
+    - emits heartbeats (progress/metric/count, aliases, getattr, tick helpers)
+      without a record-row path, or
+    - accumulates entities with no record path and no enclosing loop that
+      already emits records (silent discovery → terminal planned dump).
+
+    Nested pagination under a parent that records, and read-only file replay
+    loops, are exempt from the silent-accumulation rule.
     """
+    parents = parents or _parent_map(tree)
     functions = _function_defs(tree)
     aliases = _heartbeat_aliases(tree)
     violations = []
     for loop in ast.walk(tree):
         if not isinstance(loop, LOOP_TYPES):
             continue
-        # Single heartbeat probe covers progress/metric/count + aliases/helpers.
-        if not _loop_emits_event(loop, 'heartbeat', functions, aliases=aliases):
-            continue
         kinds = _loop_record_kinds(loop, functions)
-        if not kinds:
+        has_heartbeat = _loop_emits_event(
+            loop, 'heartbeat', functions, aliases=aliases)
+        produces = _loop_produces_entities(loop)
+        if has_heartbeat:
+            if not kinds:
+                violations.append(('ROW_LIVENESS_MISSING', loop.lineno))
+            elif kinds == {'phase'} and produces:
+                violations.append(('BUSINESS_ROW_LIVENESS_MISSING', loop.lineno))
+        elif produces and not kinds:
+            if _ancestor_loop_has_record_kinds(loop, parents, functions):
+                continue
+            if _read_source_loop(loop, parents) is not None:
+                continue
             violations.append(('ROW_LIVENESS_MISSING', loop.lineno))
-        elif kinds == {'phase'} and _loop_produces_entities(loop):
-            violations.append(('BUSINESS_ROW_LIVENESS_MISSING', loop.lineno))
     return violations
 
 
