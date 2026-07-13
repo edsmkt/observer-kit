@@ -51,7 +51,7 @@ The demo scopes one graph and one source table to each SQLite file. It proves
 versioned input hashes, attempts, cache reuse, row evolution, and aggregate
 node outcomes. A production coordinator also implements the leases, queue,
 transactional outbox, children, write intents, and write receipts defined in
-[`flow-contract.md`](../../skills/observer-flow/references/flow-contract.md).
+[`flow-contract.md`](../../.claude/skills/observer-flow/references/flow-contract.md).
 The mixed coordinator schedules `map`, `batch`, and `sink` nodes from declared
 dependencies, so manifest array order is presentation rather than execution
 order. Structured `when` conditions apply to individual and batch nodes.

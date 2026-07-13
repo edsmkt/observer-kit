@@ -75,10 +75,10 @@ see what changed instead of losing the earlier attempt.
 This repository includes two complementary agent skills and one shared local
 dashboard:
 
-- **[Observer Kit](skills/observer-kit/SKILL.md)** supervises execution with
+- **[Observer Kit](.claude/skills/observer-kit/SKILL.md)** supervises execution with
   live rows, source locks, durable resume, shared throttling, controls, review,
   and explicit full-run approval.
-- **[Observer Flow](skills/observer-flow/SKILL.md)** designs multi-stage graphs
+- **[Observer Flow](.claude/skills/observer-flow/SKILL.md)** designs multi-stage graphs
   where later transformations depend on earlier results. Nodes may map, batch,
   branch, expand, join, aggregate, or deliver records.
 
@@ -342,12 +342,12 @@ That lets Observer Kit identify the same dataset across retries and show its
 history in one run lane.
 
 For implementation patterns and event vocabulary, see
-[skills/observer-kit/references/pattern.md](skills/observer-kit/references/pattern.md).
-The agent skill is at [skills/observer-kit/SKILL.md](skills/observer-kit/SKILL.md).
+[.claude/skills/observer-kit/references/pattern.md](.claude/skills/observer-kit/references/pattern.md).
+The agent skill is at [.claude/skills/observer-kit/SKILL.md](.claude/skills/observer-kit/SKILL.md).
 
 For dependency-driven workflows, see the
-[Observer Flow skill](skills/observer-flow/SKILL.md) and its
-[graph contract](skills/observer-flow/references/flow-contract.md).
+[Observer Flow skill](.claude/skills/observer-flow/SKILL.md) and its
+[graph contract](.claude/skills/observer-flow/references/flow-contract.md).
 
 ## CLI Reference
 

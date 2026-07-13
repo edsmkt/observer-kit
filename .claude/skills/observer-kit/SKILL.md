@@ -5,12 +5,11 @@ description: Harness for visible, reviewable, resumable agent-run data movement.
 
 # Observer Kit
 
-Use Observer Kit as a local workflow **harness**. The current Codex, Claude,
-Pi, Command Code, Goose, or other agent session remains the brain. The skill
-supplies judgment, the CLI supplies repeatable plumbing, the script performs the
-work, and the watcher carries operator messages back to the active session.
+Treat every job as a **harness**: the agent session is the brain; this skill
+supplies judgment; the CLI supplies plumbing; the script does the work; the
+watcher carries operator messages back into the session.
 
-Build every run around two guarantees:
+Two leading guarantees shape every step:
 
 - **Liveness**: JSONL events and table rows advance while work happens so the
   dashboard stays current.
@@ -26,7 +25,7 @@ on comparison or redo lanes.
 Resolve relative paths from the directory containing this `SKILL.md`.
 
 Read the Observer Kit README from the repository checkout
-[`../../README.md`](../../README.md) or the
+[`../../../README.md`](../../../README.md) or the
 [public repository](https://github.com/edsmkt/observer-kit/blob/main/README.md)
 for the product promise, skill/CLI split, operator journey, and dashboard expectations.
 
@@ -110,7 +109,8 @@ Use `start_observed_run()` around the real job and pass the actual `source=`,
 `dry_run`, `description`, `todo`, `progress_table`, and concise
 `summary_metrics` whose keys advance through `run.count()` and become scalar terminal counters.
 
-Apply the production contracts from `references/pattern.md`:
+Wire the **harness** via `from observer_kit.runguard import start_observed_run`
+and the production contracts in `references/pattern.md`:
 
 1. Acquire the source-derived lock before the first spend or mutation.
 2. Record the input snapshot, script/config identity, destination, and transform
@@ -139,7 +139,8 @@ resume preserves confirmed spend and writes while selecting remaining work.
 
 ## 5. Prove The Sample
 
-With the CLI helper, start the dashboard before the sample so rows arrive live:
+Treat the sample as a **tracer bullet**: real path, bounded scope, operator-
+visible proof. Start the dashboard before the sample so rows arrive live:
 
 ```bash
 observer-kit init .
@@ -207,7 +208,7 @@ observer-kit watch .observer --all --follow
 observer-kit run --state-dir .observer -- python3 workflow.py --full-run
 ```
 
-For interactive dashboard chat, use the AXI-style poll loop so the UI shows
+For interactive dashboard chat, use the AXI-style **poll** loop so the UI shows
 **listening** while you wait (`poll` → note → `reply` → `poll` again). Watcher
 ownership refuses overlapping bridges; parent-owned watchers exit with their CLI
 process. Use `observer-kit watch .observer --status` for inspection.

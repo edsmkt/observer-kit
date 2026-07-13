@@ -13,10 +13,12 @@ from pathlib import Path
 
 passed = failed = 0
 HERE = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else (
-    Path(__file__).resolve().parents[1] / 'skills' / 'observer-kit'
+    Path(__file__).resolve().parents[1] / '.claude' / 'skills' / 'observer-kit'
 )
 if HERE.name == 'observer-kit' and HERE.parent.name == 'skills':
-    REPO = HERE.parents[1]
+    # .claude/skills/observer-kit → repo root is parents[2]
+    # skills/observer-kit (legacy) → repo root is parents[1]
+    REPO = HERE.parents[2] if HERE.parents[1].name == '.claude' else HERE.parents[1]
 else:
     REPO = Path(__file__).resolve().parents[1]
 SKILL = HERE / 'SKILL.md'
@@ -81,7 +83,7 @@ required_paths = [PATTERN, LINTER, EXPLAIN]
 ok('every bundled context pointer resolves', all(path.is_file() for path in required_paths),
    ', '.join(str(path) for path in required_paths))
 ok('README and production pattern have explicit purpose pointers',
-   '../../README.md' in skill and
+   ('../../../README.md' in skill or '../../README.md' in skill) and
    '[`references/pattern.md`](references/pattern.md)' in skill and
    'read' in skill[skill.index('references/pattern.md') - 120:
                    skill.index('references/pattern.md') + 160].lower() and

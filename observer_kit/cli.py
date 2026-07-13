@@ -26,6 +26,8 @@ def _skill_dir() -> Path:
         return Path(env_dir).expanduser().resolve()
     candidates = []
     if (ROOT / "pyproject.toml").is_file():
+        candidates.append(ROOT / ".claude" / "skills" / "observer-kit")
+        # Legacy layout kept as a fallback for older checkouts.
         candidates.append(ROOT / "skills" / "observer-kit")
     candidates.append(PACKAGE_ROOT / "_skills" / "observer-kit")
     return next((p for p in candidates if p.exists()), candidates[0] if candidates else PACKAGE_ROOT)
@@ -150,8 +152,8 @@ def cmd_test(args: argparse.Namespace) -> int:
     package_dir = str(PACKAGE_ROOT)
     # runguard subprocess tests use `import runguard` via import_shims.
     shim_dir = str(tests_dir / "import_shims")
-    skill_dir = str(ROOT / "skills" / "observer-kit")
-    flow_skill_dir = ROOT / "skills" / "observer-flow"
+    skill_dir = str(ROOT / ".claude" / "skills" / "observer-kit")
+    flow_skill_dir = ROOT / ".claude" / "skills" / "observer-flow"
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
         [str(ROOT), shim_dir, env.get("PYTHONPATH", "")]

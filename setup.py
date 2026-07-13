@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent
 
 
 class BuildPy(_build_py):
-    """Build package data; product runtime lives under observer_kit/, not skills/."""
+    """Build package data; product runtime lives under observer_kit/, not skill playbooks."""
 
     def run(self):
         super().run()

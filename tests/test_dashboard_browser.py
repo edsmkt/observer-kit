@@ -16,7 +16,7 @@ from urllib.request import urlopen
 
 REPO = Path(__file__).resolve().parents[1]
 RUN_DASHBOARD = REPO / "observer_kit" / "run_dashboard.py"
-SKILL_DIR = REPO / "skills" / "observer-kit"
+SKILL_DIR = REPO / ".claude" / "skills" / "observer-kit"
 REQUIRE_BROWSER = os.environ.get("OBSERVER_REQUIRE_BROWSER_TEST") == "1"
 
 try:

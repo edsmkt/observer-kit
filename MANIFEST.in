@@ -3,8 +3,9 @@ include README.md
 recursive-include observer_kit/assets *
 include observer_kit/EXPLAIN.md
 recursive-include examples/observer-flow-demo *
-recursive-include skills *
+recursive-include .claude/skills/observer-kit *
+recursive-include .claude/skills/observer-flow *
 recursive-include tests *
 recursive-exclude examples/observer-flow-demo __pycache__ *.py[cod] .DS_Store
-recursive-exclude skills __pycache__ *.py[cod] .DS_Store
+recursive-exclude .claude/skills __pycache__ *.py[cod] .DS_Store
 recursive-exclude tests __pycache__ *.py[cod] .DS_Store

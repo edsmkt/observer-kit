@@ -48,10 +48,10 @@ import paths aligned with the same contract.
 
 The canonical execution contract lives in:
 
-- [`skills/observer-kit/SKILL.md`](../skills/observer-kit/SKILL.md)
-- [`skills/observer-kit/references/pattern.md`](../skills/observer-kit/references/pattern.md)
-- [`skills/observer-flow/SKILL.md`](../skills/observer-flow/SKILL.md)
-- [`skills/observer-flow/references/flow-contract.md`](../skills/observer-flow/references/flow-contract.md)
+- [`.claude/skills/observer-kit/SKILL.md`](../.claude/skills/observer-kit/SKILL.md)
+- [`.claude/skills/observer-kit/references/pattern.md`](../.claude/skills/observer-kit/references/pattern.md)
+- [`.claude/skills/observer-flow/SKILL.md`](../.claude/skills/observer-flow/SKILL.md)
+- [`.claude/skills/observer-flow/references/flow-contract.md`](../.claude/skills/observer-flow/references/flow-contract.md)
 
 The README is the product overview and quick start. This matrix documents the
 supported distribution paths. Runtime code should stay small and defer

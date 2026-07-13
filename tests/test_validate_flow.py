@@ -222,7 +222,11 @@ with tempfile.TemporaryDirectory() as tmp:
        proc.stdout + proc.stderr)
 
 # Shipped demo manifests must pass the same structural gate as skill examples.
-demo_root = HERE.parents[1] / "examples" / "observer-flow-demo"
+# Skill lives at .claude/skills/observer-flow (or legacy skills/observer-flow).
+if HERE.parent.name == "skills" and HERE.parents[1].name == ".claude":
+    demo_root = HERE.parents[2] / "examples" / "observer-flow-demo"
+else:
+    demo_root = HERE.parents[1] / "examples" / "observer-flow-demo"
 for name in ("pipeline.flow.json", "batch_pipeline.flow.json"):
     path = demo_root / name
     if not path.is_file():

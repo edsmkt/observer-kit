@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 
 passed = failed = 0
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SKILL_ROOT = REPO_ROOT / "skills" / "observer-kit"
+SKILL_ROOT = REPO_ROOT / ".claude" / "skills" / "observer-kit"
 PACKAGE_ROOT = REPO_ROOT / "observer_kit"
 CLI_ENV = os.environ.copy()
 SOURCE_PACKAGE = REPO_ROOT / "observer_kit" / "__init__.py"

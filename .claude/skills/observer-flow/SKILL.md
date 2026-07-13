@@ -5,11 +5,9 @@ description: Orchestration playbook for multi-stage agent-run data transformatio
 
 # Observer Flow
 
-Use Observer Flow to design and operate a visible dependency graph made from
-small data transformations. The active Codex, Claude, Pi, Command Code, Goose,
-or other agent session remains the brain. One coordinator owns scheduling, and
-Observer Kit supplies the execution harness, durable review surface, controls,
-and approval gate.
+Design a visible **graph** of small data transforms. The active agent session
+remains the brain. One **coordinator** owns scheduling. Observer Kit supplies
+the **harness**: execution, durable review surface, controls, and approval gate.
 
 Use these terms consistently:
 
@@ -42,9 +40,8 @@ fan-out, joins, delivery, recovery, and approval scope. Read
 when a concrete conditional-enrichment graph helps.
 
 When the workflow contains reusable code or repeated node clusters, read
-[`references/cookbook-contract.md`](references/cookbook-contract.md). It tells
-the agent how to create and maintain the user's project cookbook from real,
-proven nodes, subflows, and integration adapters.
+[`references/cookbook-contract.md`](references/cookbook-contract.md) before
+creating the project cookbook. It tells the agent how to create and maintain the user's project cookbook from real, proven nodes, subflows, and integration adapters.
 
 Use the CLI surface verified by `observer-kit --help`. The baseline execution
 path works today:
@@ -103,10 +100,10 @@ with the node's `updates` list. Represent intentional merges with an explicit
 merge node. Give expanded child rows deterministic keys derived from their
 parent and source child identity.
 
-Validate structure with:
+Validate structure from this skill directory with:
 
 ```bash
-python3 /path/to/observer-flow/scripts/validate_flow.py pipeline.flow.json
+python3 scripts/validate_flow.py pipeline.flow.json
 ```
 
 Build a plan ID from the canonical manifest, node script and config hashes,
@@ -118,11 +115,13 @@ every output has one owner, and the plan ID captures every material behavior.
 
 ## 4. Build The Coordinator
 
-Use one coordinator as the execution authority. For a new local flow, use
-SQLite as the authoritative queue and result index; preserve an existing
-transactional database or queue when it already provides the same guarantees.
-Use Observer Kit JSONL as the append-only audit and dashboard projection. Emit
-`flow_graph`, `flow_node`, `flow_unit`, and bounded `flow_batch` events.
+Use one coordinator as the execution authority. Use
+[`../../../examples/observer-flow-demo/flow_coordinator.py`](../../../examples/observer-flow-demo/flow_coordinator.py)
+(with `demo_runtime.py`) as the runnable skeleton and adapt it to the project.
+For a new local flow, use SQLite as the authoritative queue and result index;
+preserve an existing transactional database or queue when it already provides the
+same guarantees. Use Observer Kit JSONL as the append-only audit and dashboard
+projection. Emit `flow_graph`, `flow_node`, `flow_unit`, and bounded `flow_batch` events.
 
 The coordinator:
 
@@ -160,7 +159,8 @@ on its business row and Flow view, and one scheduler owns graph dispatch.
 
 ## 5. Prove A Bounded Sample
 
-Start the dashboard first, then run a stratified sample through the coordinator:
+Treat the sample as a **tracer bullet** through the graph: real nodes, bounded
+rows, live Flow and Data. Start the dashboard, then run a stratified sample:
 
 ```bash
 observer-kit dashboard .observer

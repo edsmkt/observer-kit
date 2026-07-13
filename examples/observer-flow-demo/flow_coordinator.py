@@ -63,7 +63,7 @@ def main() -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     os.environ["RUNGUARD_STATE_DIR"] = str(state_dir)
     os.environ["RUNGUARD_SESSION"] = args.session
-    sys.path.insert(0, str(REPO / "skills" / "observer-kit"))
+    sys.path.insert(0, str(REPO / ".claude" / "skills" / "observer-kit"))
     from runguard import RunPaused, ledger, start_observed_run
 
     flow = json.loads(Path(args.flow).expanduser().resolve().read_text(encoding="utf-8"))
