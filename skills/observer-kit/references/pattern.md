@@ -27,17 +27,23 @@ Observer Kit is a local workflow harness with five pieces:
 
 1. **The agent skill** carries the operational judgment: map the real workflow,
    design the operator view, run a sample, inspect evidence, and request approval.
-2. **The CLI** repeats setup and transport: `init`, `dashboard`, `run`, `watch`,
-   `reply`, `doctor`, and `test`.
-3. **`runguard.py`** gives scripts source locks, append-only events, counters,
-   checkpoints, validation, policy gates, write intents and receipts, controls,
-   dead letters, simulation, and shared throttling.
-4. **`run_dashboard.py`** tails a state directory and renders every JSONL lane.
-   It also records operator chat and control requests.
-5. **`watch_chat.py`** carries dashboard messages into the active agent harness.
+2. **The CLI** (`observer-kit` / `python -m observer_kit`) repeats setup and
+   transport: `init`, `dashboard`, `run`, `watch`, `reply`, `lint`, `doctor`, and
+   `test`.
+3. **`observer_kit.runguard`** (package module) gives scripts source locks,
+   append-only events, counters, checkpoints, validation, policy gates, write
+   intents and receipts, controls, dead letters, simulation, and shared
+   throttling. Prefer
+   `from observer_kit.runguard import start_observed_run`.
+4. **`observer_kit.run_dashboard`** tails a state directory and renders every
+   JSONL lane. It also records operator chat and control requests. Launch via
+   `observer-kit dashboard`.
+5. **`observer_kit.watch_chat`** carries dashboard messages into the active
+   agent harness. Launch via `observer-kit watch`.
 
 The agent session remains the brain. The watcher supplies input, and the script
-acknowledges controls at its own durable boundaries.
+acknowledges controls at its own durable boundaries. Product runtime lives only
+in the installable package. The skill tree is a playbook (markdown + templates).
 
 ## Helper Availability And Launch Paths
 
@@ -59,33 +65,39 @@ python3 -m observer_kit --help
 ```
 
 Repeat both probes and retain the exact successful prefix. Package-manager,
-network, or permission constraints lead to the bundled-script path plus a
-concise setup note for the operator. A user-requested skill-only setup follows
-that same path directly.
+network, or permission constraints block setup until the package/CLI installs;
+leave a concise setup note for the operator rather than inventing a second
+runtime path. The skill tree is playbook markdown and templates only.
 
 The CLI helper path uses that prefix for `init`, `dashboard`, `run`, `watch`,
-`reply`, `doctor`, and `test`.
+`reply`, `lint`, `doctor`, and `test`.
 
-The bundled-script path works directly from the directory containing
-`SKILL.md`. Copy `runguard.py` and `watch_chat.py` beside the workflow, create
-`.observer` (with `runs/` for per-lane ledgers), and copy `EXPLAIN.md` into it.
-Start the dashboard as a long-lived process, then launch the sample through the
-active harness session:
+The workflow import after install is the package:
 
-```bash
-python3 /absolute/skill/path/run_dashboard.py .observer --port 8484
-python3 workflow.py --dry-run --limit 10
+```python
+from observer_kit.runguard import start_observed_run, input_snapshot
 ```
 
-As soon as the worker prints `OBSERVER_RUN_STARTED <run-id>`, launch the
-run-scoped watcher in an independent monitor:
+`observer-kit init` creates only project state (`.observer/`, `runs/`,
+`EXPLAIN.md`). Product runtime stays in the package; use the deprecated
+`--vendor` flag only for temporary local copies of package modules.
+
+Typical launch after install:
 
 ```bash
-python3 watch_chat.py <run-id> --state-dir .observer --follow
+observer-kit init .
+observer-kit dashboard .observer --port 8484
+observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
 ```
 
-Keep the same dashboard and watcher alive for the approved full run. Both paths
-produce the same source locks, JSONL ledgers, controls, chat, and dashboard.
+As soon as the worker prints `OBSERVER_RUN_STARTED <run-id>`, keep a watcher
+attached (or rely on `observer-kit run` to create one):
+
+```bash
+observer-kit watch .observer --run runguard:<run-id> --follow
+```
+
+Keep the same dashboard and watcher alive for the approved full run.
 
 ## Source Identity And Run Lanes
 
@@ -104,7 +116,7 @@ lock. Disjoint source identities can run concurrently.
 Capture reviewed input state with `input_snapshot()`:
 
 ```python
-from runguard import input_snapshot, start_observed_run
+from observer_kit.runguard import input_snapshot, start_observed_run
 
 snapshot = input_snapshot(args.input)
 run = start_observed_run(
@@ -149,7 +161,7 @@ Use `start_observed_run()` for new scripts and unfamiliar existing scripts after
 tracing their actual CLI and work paths into the standard lifecycle:
 
 ```python
-from runguard import RunPaused, start_observed_run
+from observer_kit.runguard import RunPaused, start_observed_run
 
 run = start_observed_run(
     'normalize-catalog',
@@ -284,7 +296,7 @@ heartbeats. The Data table advances on `record` events. During multi-page
 discovery or long enrichment, emit stable business rows (or a phase row before
 an entity key exists) in the same loop that spends time — including dry-run
 `destination='planned'` rows. Heartbeats for minutes followed by a post-discovery
-planned-record dump fail the sample gate and `lint_emit.py` (ROW LIVENESS
+planned-record dump fail the sample gate and `observer-kit lint` (ROW LIVENESS
 MISSING).
 
 `run.step(name, **fields)` reserves `name` for the step label. Use `label` or
@@ -365,7 +377,7 @@ page, before starting the next unit. On resume, replay persisted units into the
 working maps, then select and execute only the remaining units. Replay is a read
 from the authoritative durable store and retains the existing checkpoint.
 
-Run `references/lint_emit.py` against every agent-written batch script. It checks
+Run `observer-kit lint <script>` (or `python3 -m observer_kit.lint_emit`) against every agent-written batch script. It checks
 for final record flushes and for result containers that advance while the script
 offers progress events in place of a durable sink. It also checks that repeated
 progress loops have a stable record-row path. Treat its zero exit as one piece
@@ -649,9 +661,13 @@ Active-branch evidence for the workflow's real effects:
 
 ## Runtime Files And APIs
 
-- `runguard.py`: runtime library vendored beside the workflow.
-- `run_dashboard.py`: one localhost server for a state directory.
-- `watch_chat.py`: watcher transport for dashboard messages and controls.
+Canonical product code lives in the installable package only:
+
+- `observer_kit.runguard`: observed-run API (locks, ledger, controls, throttle).
+- `observer_kit.run_dashboard` / `observer-kit dashboard`: localhost server.
+- `observer_kit.watch_chat` / `observer-kit watch`: chat transport.
+- `observer_kit.lint_emit` / `observer-kit lint`: static liveness/durability check.
+- Skill tree: playbook markdown and templates only (no product `.py` runtime).
 - `.observer/`: project state home. Each continuous lane is a folder under
   `runs/<lane>/` with `events.jsonl`, `EXPLAIN.md`, `chat.jsonl`, and
   `controls.jsonl`. Locks and throttles stay at the state-dir root for
@@ -660,8 +676,7 @@ Active-branch evidence for the workflow's real effects:
 - `EXPLAIN.md`: project template seed under `.observer/`; each new lane gets
   its own copy under `runs/<lane>/EXPLAIN.md` (process narrative still belongs
   in Lavish when you need a polished explainer).
-- `references/lint_emit.py`: static liveness/durability heuristic.
-- `example_worker.py`: deterministic dry-run, full-run, and resume example.
+- `examples/example_worker.py`: deterministic dry-run, full-run, and resume example.
 
 Core helpers:
 

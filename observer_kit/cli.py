@@ -14,23 +14,21 @@ from urllib.request import urlopen
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_SKILLS = Path(__file__).resolve().parent / "_skills"
+# Package root (observer_kit/) and optional source checkout root (repo/).
+PACKAGE_ROOT = Path(__file__).resolve().parent
+ROOT = PACKAGE_ROOT.parent if (PACKAGE_ROOT.parent / "pyproject.toml").is_file() else PACKAGE_ROOT
 
 
 def _skill_dir() -> Path:
+    """Agent skill playbook directory (markdown/templates only — not product runtime)."""
     env_dir = os.environ.get("OBSERVER_KIT_SKILL_DIR")
     if env_dir:
         return Path(env_dir).expanduser().resolve()
     candidates = []
     if (ROOT / "pyproject.toml").is_file():
-        candidates.append(ROOT / "skills" / "observer-kit")  # source checkout
-    candidates.extend([
-        PACKAGE_SKILLS / "observer-kit",  # wheel-owned resources
-        Path(sys.prefix) / "skills" / "observer-kit",  # legacy wheel layout
-        Path(sys.base_prefix) / "skills" / "observer-kit",
-    ])
-    return next((p for p in candidates if p.exists()), candidates[0])
+        candidates.append(ROOT / "skills" / "observer-kit")
+    candidates.append(PACKAGE_ROOT / "_skills" / "observer-kit")
+    return next((p for p in candidates if p.exists()), candidates[0] if candidates else PACKAGE_ROOT)
 
 
 SKILL_DIR = _skill_dir()
@@ -44,15 +42,30 @@ def _timestamp() -> str:
     return f'{base}.{nsec:09d}Z'
 
 
-def skill_file(name: str) -> Path:
-    path = SKILL_DIR / name
+def package_file(name: str) -> Path:
+    """Resolve a file shipped with the installable package (runtime + templates)."""
+    path = PACKAGE_ROOT / name
     if not path.exists():
         raise SystemExit(
-            f"Observer Kit file not found: {path}\n"
-            "Set OBSERVER_KIT_SKILL_DIR to the directory containing runguard.py "
-            "and run_dashboard.py."
+            f"Observer Kit package file not found: {path}\n"
+            "Reinstall the package: python -m pip install -e ."
         )
     return path
+
+
+def skill_file(name: str) -> Path:
+    """Resolve an agent skill playbook/template file (not product runtime)."""
+    path = SKILL_DIR / name
+    if path.exists():
+        return path
+    # Templates also ship in the package for init without a skill tree.
+    pkg = PACKAGE_ROOT / name
+    if pkg.exists():
+        return pkg
+    raise SystemExit(
+        f"Observer Kit skill/template file not found: {name}\n"
+        f"Looked under {SKILL_DIR} and {PACKAGE_ROOT}."
+    )
 
 
 def copy_file(src: Path, dst: Path, force: bool) -> str:
@@ -63,14 +76,29 @@ def copy_file(src: Path, dst: Path, force: bool) -> str:
     return f"wrote {dst}"
 
 
+def _runtime_module_path(module: str) -> Path:
+    """Path to a package runtime module for subprocess entrypoints."""
+    return package_file(f"{module}.py")
+
+
 def cmd_init(args: argparse.Namespace) -> int:
+    """Prepare project state. Product runtime comes from the installed package."""
     project = Path(args.project).expanduser().resolve()
     project.mkdir(parents=True, exist_ok=True)
-    messages = [
-        copy_file(skill_file("runguard.py"), project / "runguard.py", args.force),
-    ]
-    if args.watch:
-        messages.append(copy_file(skill_file("watch_chat.py"), project / "watch_chat.py", args.force))
+    messages: list[str] = []
+    # Optional legacy vendoring (deprecated): only with --vendor.
+    if getattr(args, "vendor", False):
+        messages.append(
+            copy_file(package_file("runguard.py"), project / "runguard.py", args.force)
+        )
+        if args.watch:
+            messages.append(
+                copy_file(package_file("watch_chat.py"), project / "watch_chat.py", args.force)
+            )
+        messages.append(
+            "note: --vendor copies are deprecated; prefer "
+            "`from observer_kit.runguard import start_observed_run`"
+        )
     state_dir = (project / args.state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     runs_dir = state_dir / "runs"
@@ -78,7 +106,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     messages.append(f"ready {state_dir}")
     messages.append(f"ready {runs_dir}")
     if args.explain:
-        messages.append(copy_file(skill_file("EXPLAIN.md"), state_dir / "EXPLAIN.md", args.force))
+        messages.append(
+            copy_file(package_file("EXPLAIN.md"), state_dir / "EXPLAIN.md", args.force)
+        )
     if args.gitignore:
         gitignore = state_dir / ".gitignore"
         if not gitignore.exists() or args.force:
@@ -89,6 +119,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("Next:")
     print(f"  observer-kit dashboard {state_dir}")
     print(f"  observer-kit watch {state_dir} --run <run-id>")
+    print("  # In workflow.py: from observer_kit.runguard import start_observed_run")
     print("  python3 your_workflow.py --dry-run --limit 10")
     return 0
 
@@ -96,7 +127,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_dashboard(args: argparse.Namespace) -> int:
     state_dir = Path(args.state_dir).expanduser().resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
-    script = skill_file("run_dashboard.py")
+    script = _runtime_module_path("run_dashboard")
     old_argv = sys.argv[:]
     try:
         sys.argv = [str(script), str(state_dir), "--port", str(args.port)]
@@ -111,29 +142,54 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
 
 def cmd_test(args: argparse.Namespace) -> int:
+    """Run the package-oriented acceptance suite."""
+    tests_dir = ROOT / "tests"
+    if not tests_dir.is_dir():
+        # Installed wheel may not ship tests; fall back to source checkout only.
+        raise SystemExit(f"tests directory not found: {tests_dir}")
+    package_dir = str(PACKAGE_ROOT)
+    # runguard subprocess tests use `import runguard` via import_shims.
+    shim_dir = str(tests_dir / "import_shims")
+    skill_dir = str(ROOT / "skills" / "observer-kit")
+    flow_skill_dir = ROOT / "skills" / "observer-flow"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(ROOT), shim_dir, env.get("PYTHONPATH", "")]
+    )
+
     tests = [
-        [sys.executable, str(skill_file("test_runguard.py")), str(SKILL_DIR)],
-        [sys.executable, str(skill_file("test_data_movement.py")), str(SKILL_DIR)],
-        [sys.executable, str(skill_file("test_lint_emit.py"))],
-        [sys.executable, str(skill_file("test_skill.py")), str(SKILL_DIR)],
-        [sys.executable, str(skill_file("test_dashboard.py"))],
-        [sys.executable, str(skill_file("test_dashboard_browser.py"))],
-        [sys.executable, str(skill_file("test_cli.py"))],
+        [sys.executable, "-B", str(tests_dir / "test_runguard.py"), shim_dir],
+        [sys.executable, "-B", str(tests_dir / "test_data_movement.py"), shim_dir],
+        [sys.executable, "-B", str(tests_dir / "test_lint_emit.py")],
+        [sys.executable, "-B", str(tests_dir / "test_skill.py"), skill_dir],
+        [sys.executable, "-B", str(tests_dir / "test_dashboard.py")],
+        [sys.executable, "-B", str(tests_dir / "test_dashboard_browser.py")],
+        [sys.executable, "-B", str(tests_dir / "test_cli.py")],
     ]
-    flow_skill_dir = SKILL_DIR.parent / "observer-flow"
     if flow_skill_dir.is_dir():
         tests.extend([
-            [sys.executable, str(flow_skill_dir / "test_validate_flow.py"), str(flow_skill_dir)],
-            [sys.executable, str(flow_skill_dir / "test_skill.py"), str(flow_skill_dir)],
+            [sys.executable, "-B", str(tests_dir / "test_validate_flow.py"),
+             str(flow_skill_dir)],
+            [sys.executable, "-B", str(tests_dir / "test_flow_skill.py"),
+             str(flow_skill_dir)],
         ])
     demo_test = ROOT / "examples" / "observer-flow-demo" / "test_flow_coordinator.py"
     if demo_test.is_file():
-        tests.append([sys.executable, str(demo_test)])
+        tests.append([sys.executable, "-B", str(demo_test)])
     for cmd in tests:
-        rc = subprocess.call(cmd)
+        rc = subprocess.call(cmd, env=env)
         if rc:
             return rc
     return 0
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    """Run the emission/durability static check on a workflow script."""
+    script = Path(args.script).expanduser().resolve()
+    if not script.is_file():
+        raise SystemExit(f"not a file: {script}")
+    lint = package_file("lint_emit.py")
+    return subprocess.call([sys.executable, "-B", str(lint), str(script)])
 
 
 def _lane_from_run_id(run_id: object) -> str:
@@ -342,7 +398,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             raise SystemExit("--run is required unless --all is set")
     cmd = [
         sys.executable,
-        str(skill_file("watch_chat.py")),
+        str(_runtime_module_path("watch_chat")),
         "--state-dir",
         str(state_dir),
         "--poll",
@@ -623,7 +679,8 @@ def _start_dashboard(state_dir: Path, port: int) -> tuple[subprocess.Popen | Non
     except (OSError, URLError):
         pass
     proc = subprocess.Popen(
-        [sys.executable, str(skill_file("run_dashboard.py")), str(state_dir), "--port", str(port)],
+        [sys.executable, str(_runtime_module_path("run_dashboard")), str(state_dir),
+         "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -642,7 +699,7 @@ def _start_watcher(state_dir: Path, run_id: str) -> subprocess.Popen:
     return subprocess.Popen(
         [
             sys.executable,
-            str(skill_file("watch_chat.py")),
+            str(_runtime_module_path("watch_chat")),
             run_id,
             "--state-dir",
             str(state_dir),
@@ -788,23 +845,48 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
     checks = []
     checks.append(("project exists", project.exists()))
-    checks.append(("runguard.py vendored", (project / "runguard.py").exists()))
-    checks.append(("watch_chat.py vendored", (project / "watch_chat.py").exists()))
+    checks.append(("package runguard available", package_file("runguard.py").exists()))
+    checks.append(("package dashboard available", package_file("run_dashboard.py").exists()))
+    checks.append(("package dashboard asset available", package_file("assets/dashboard.js").exists()))
+    checks.append(("package watcher available", package_file("watch_chat.py").exists()))
     checks.append(("state dir exists", (project / args.state_dir).exists()))
-    checks.append(("state dir ignores local ledger data", (project / args.state_dir / ".gitignore").exists()))
-    checks.append(("operator explainer exists", (project / args.state_dir / "EXPLAIN.md").exists()))
-    checks.append(("dashboard available", skill_file("run_dashboard.py").exists()))
-    checks.append(("dashboard asset available", skill_file("assets/dashboard.js").exists()))
-    checks.append(("watcher available", skill_file("watch_chat.py").exists()))
-    checks.append(("tests available", skill_file("test_runguard.py").exists()))
+    checks.append(
+        ("state dir ignores local ledger data",
+         (project / args.state_dir / ".gitignore").exists())
+    )
+    checks.append(
+        ("operator explainer exists",
+         (project / args.state_dir / "EXPLAIN.md").exists())
+    )
+    checks.append(("runs/ home exists", (project / args.state_dir / "runs").is_dir()))
 
     ok = True
     for label, passed in checks:
         ok = ok and passed
         print(f"{'OK ' if passed else 'ERR'} {label}")
+
+    # Deprecated vendored copies: warn but do not fail.
+    vendored = []
+    if (project / "runguard.py").exists():
+        vendored.append("runguard.py")
+    if (project / "watch_chat.py").exists():
+        vendored.append("watch_chat.py")
+    if vendored:
+        print()
+        print(
+            "WARN deprecated vendored product files in project: "
+            + ", ".join(vendored)
+        )
+        print(
+            "     Prefer package imports: "
+            "from observer_kit.runguard import start_observed_run"
+        )
+        print("     Remove the copies after migrating workflows.")
+
     if not ok:
         print()
         print(f"Run: observer-kit init {project}")
+        print("And: python -m pip install -e .   # package provides runtime")
         return 1
     return 0
 
@@ -827,7 +909,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = sub.add_parser(
         "init",
-        help="vendor runguard.py and create a state dir",
+        help="create .observer state home (package provides runtime)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""examples:
   observer-kit init .
@@ -836,6 +918,7 @@ def build_parser() -> argparse.ArgumentParser:
 next:
   observer-kit dashboard ./my-project/.observer
   observer-kit watch ./my-project/.observer --all --follow
+  # from observer_kit.runguard import start_observed_run
 """,
     )
     init.add_argument("project", nargs="?", default=".", help="target project directory")
@@ -845,9 +928,21 @@ next:
                       help="do not copy EXPLAIN.md into the state dir")
     init.add_argument("--no-gitignore", dest="gitignore", action="store_false",
                       help="do not write a state-dir .gitignore")
+    init.add_argument(
+        "--vendor",
+        action="store_true",
+        help="(deprecated) copy runguard.py/watch_chat.py into the project",
+    )
     init.add_argument("--no-watch", dest="watch", action="store_false",
-                      help="do not vendor watch_chat.py next to runguard.py")
-    init.set_defaults(func=cmd_init, explain=True, gitignore=True, watch=True)
+                      help="with --vendor, skip watch_chat.py")
+    init.set_defaults(func=cmd_init, explain=True, gitignore=True, watch=True, vendor=False)
+
+    lint = sub.add_parser(
+        "lint",
+        help="static check for row liveness and durable emit patterns",
+    )
+    lint.add_argument("script", help="workflow script path")
+    lint.set_defaults(func=cmd_lint)
 
     dash = sub.add_parser(
         "dashboard",

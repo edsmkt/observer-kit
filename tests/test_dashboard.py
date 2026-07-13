@@ -11,7 +11,8 @@ from urllib.request import Request, urlopen
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUN_DASHBOARD = os.path.join(HERE, 'run_dashboard.py')
+REPO = os.path.dirname(HERE)
+RUN_DASHBOARD = os.path.join(REPO, 'observer_kit', 'run_dashboard.py')
 passed, failed = 0, 0
 
 

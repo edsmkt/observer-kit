@@ -33,9 +33,8 @@ for the product promise, skill/CLI split, operator journey, and dashboard expect
 Establish a verified CLI command prefix before project setup. Probe
 `observer-kit --help`, then `python3 -m observer_kit --help`. When both probes
 fail, install the CLI from the public repository into a writable Python
-environment using the README command, then repeat the probes. Use the
-bundled-script path in `references/pattern.md` when installation remains
-unavailable or the user selects a skill-only setup.
+environment using the README command, then repeat the probes. Package install
+is required for product runtime; the skill tree is playbook-only.
 
 Choose the active branch and load its reference:
 
@@ -148,10 +147,10 @@ observer-kit dashboard .observer
 observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
 ```
 
-Run the static emission/durability check from the skill directory:
+Run the static emission/durability check via the package CLI:
 
 ```bash
-python3 references/lint_emit.py /absolute/path/to/workflow.py
+observer-kit lint /absolute/path/to/workflow.py
 ```
 
 Exercise the real sample and verify this universal minimum:
@@ -242,8 +241,9 @@ dashboard view.
 
 - [`references/pattern.md`](references/pattern.md): production integration and
   operation contract; read in full for workflow design and adaptation.
-- [`references/lint_emit.py`](references/lint_emit.py): static check for final flushes, row liveness, and durable work loops; run before every full dataset.
-- `runguard.py`, `run_dashboard.py`, `watch_chat.py`: vendored runtime, dashboard, chat transport.
+- Package runtime: `observer_kit.runguard`, dashboard, watch, `observer-kit lint`.
+  Import and launch only via package/CLI.
 - `EXPLAIN.md`: project-specific statement of intent shown to the operator.
 
-With the CLI helper, run `observer-kit doctor .` after setup and `observer-kit test` after core changes. The bundled-script path runs the matching `test_*.py` files.
+With the CLI helper, run `observer-kit doctor .` after setup and `observer-kit test`
+after core changes.

@@ -10,11 +10,15 @@ import tempfile
 import time
 
 
-RG_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
+_TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.dirname(_TEST_DIR)
+RG_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_TEST_DIR, 'import_shims')
 STATE = tempfile.mkdtemp(prefix='rg-data-')
 os.environ['RUNGUARD_STATE_DIR'] = STATE
+sys.path.insert(0, _REPO)
 sys.path.insert(0, RG_DIR)
 import runguard  # noqa: E402
+
 
 passed = failed = 0
 

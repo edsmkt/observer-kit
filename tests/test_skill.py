@@ -12,11 +12,21 @@ from pathlib import Path
 
 
 passed = failed = 0
-HERE = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parent
+HERE = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else (
+    Path(__file__).resolve().parents[1] / 'skills' / 'observer-kit'
+)
+if HERE.name == 'observer-kit' and HERE.parent.name == 'skills':
+    REPO = HERE.parents[1]
+else:
+    REPO = Path(__file__).resolve().parents[1]
 SKILL = HERE / 'SKILL.md'
 PATTERN = HERE / 'references' / 'pattern.md'
-LINTER = HERE / 'references' / 'lint_emit.py'
+# lint lives in the installable package after the package/skill split
+LINTER = REPO / 'observer_kit' / 'lint_emit.py'
 EXPLAIN = HERE / 'EXPLAIN.md'
+if not EXPLAIN.is_file():
+    EXPLAIN = REPO / 'observer_kit' / 'EXPLAIN.md'
+EXAMPLE_WORKER = REPO / 'examples' / 'example_worker.py'
 
 
 def ok(name: str, condition: bool, detail: str = '') -> None:
@@ -231,20 +241,25 @@ ok('workflow map selects the branch set consumed by sample verification',
    'branch list recorded in Step 2 and `EXPLAIN.md`' in prove_words and
    'same selected set' in pattern_words and
    'every selected verification branch has a recorded trigger reason' in map_words)
-ok('skill supports both CLI-helper and bundled-script launch paths',
+ok('skill supports package/CLI launch paths (playbook-only skill tree)',
    'observer-kit --help' in skill and
-   'bundled-script path' in skill and
+   'python3 -m observer_kit --help' in skill and
    '## Helper Availability And Launch Paths' in pattern and
    'python3 -m observer_kit --help' in pattern and
-   'run_dashboard.py .observer --port 8484' in pattern and
-   'watch_chat.py <run-id> --state-dir .observer --follow' in pattern)
+   'from observer_kit.runguard import start_observed_run' in pattern and
+   'observer-kit dashboard .observer' in pattern and
+   'observer-kit watch .observer' in pattern and
+   not (HERE / 'runguard.py').is_file() and
+   not (HERE / 'run_dashboard.py').is_file() and
+   not (HERE / 'watch_chat.py').is_file() and
+   not (HERE / 'references' / 'lint_emit.py').is_file())
 ok('cold-start setup installs and verifies a missing CLI',
    'Establish a verified CLI command prefix before project setup' in skill and
    'install the CLI from the public repository into a writable Python environment' in skill_words and
    'then repeat the probes' in skill_words and
    'python3 -m pip install git+https://github.com/edsmkt/observer-kit.git' in pattern and
    'Repeat both probes and retain the exact successful prefix' in pattern_words and
-   'Package-manager, network, or permission constraints lead to the bundled-script path' in pattern_words)
+   'Package install is required for product runtime' in skill_words)
 ok('operator explainer is generic and ready for branch selection',
    all(branch in explain_words for branch in branch_ids) and
    all(term in explain_words for term in (
@@ -267,7 +282,8 @@ with tempfile.TemporaryDirectory(prefix='observer-skill-example-') as tmp:
     output = root / 'output.jsonl'
     env = os.environ.copy()
     env['RUNGUARD_STATE_DIR'] = str(root / 'state')
-    base = [sys.executable, '-B', str(HERE / 'example_worker.py'),
+    env['PYTHONPATH'] = str(REPO) + os.pathsep + env.get('PYTHONPATH', '')
+    base = [sys.executable, '-B', str(EXAMPLE_WORKER),
             '--table', 'alpha', '--limit', '2', '--output', str(output)]
 
     dry = subprocess.run(base + ['--dry-run'], env=env, capture_output=True,
@@ -292,9 +308,9 @@ with tempfile.TemporaryDirectory(prefix='observer-skill-example-') as tmp:
 
     previous_state_dir = os.environ.get('RUNGUARD_STATE_DIR')
     os.environ['RUNGUARD_STATE_DIR'] = env['RUNGUARD_STATE_DIR']
-    sys.path.insert(0, str(HERE))
+    sys.path.insert(0, str(REPO))
     try:
-        from runguard import start_observed_run
+        from observer_kit.runguard import start_observed_run
         pending_run = start_observed_run(
             'example-transform', source='observer-kit-example:alpha',
             destination=str(output), transform_version='v1')
@@ -309,7 +325,7 @@ with tempfile.TemporaryDirectory(prefix='observer-skill-example-') as tmp:
             os.environ['RUNGUARD_STATE_DIR'] = previous_state_dir
 
     recover = subprocess.run(
-        [sys.executable, '-B', str(HERE / 'example_worker.py'),
+        [sys.executable, '-B', str(EXAMPLE_WORKER),
          '--table', 'alpha', '--limit', '3', '--output', str(output), '--full-run'],
         env=env, capture_output=True, text=True, timeout=30)
     recovered_rows = [json.loads(line) for line in output.read_text(encoding='utf-8').splitlines()]

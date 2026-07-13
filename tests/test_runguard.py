@@ -4,9 +4,14 @@ stale-lock takeover, re-entrancy, scope independence, ledger append/continuity,
 and cross-process throttle pacing. Uses real subprocesses. Exits non-zero on any fail."""
 import os, sys, json, time, subprocess, tempfile, textwrap
 
-RG_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))  # dir with runguard.py
+# RG_DIR is the import shim directory (`import runguard` → observer_kit.runguard).
+# REPO must also be on PYTHONPATH so the shim can import the package.
+_TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.dirname(_TEST_DIR)
+RG_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_TEST_DIR, 'import_shims')
 STATE = tempfile.mkdtemp(prefix='rgtest-')
-ENV = {**os.environ, 'RUNGUARD_STATE_DIR': STATE, 'PYTHONPATH': RG_DIR}
+_PYPATH = os.pathsep.join([_REPO, RG_DIR, os.environ.get('PYTHONPATH', '')])
+ENV = {**os.environ, 'RUNGUARD_STATE_DIR': STATE, 'PYTHONPATH': _PYPATH}
 
 
 def lane_events(slug: str) -> str:

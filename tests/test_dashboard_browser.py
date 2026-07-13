@@ -14,8 +14,9 @@ from urllib.parse import quote
 from urllib.request import urlopen
 
 
-SKILL_DIR = Path(__file__).resolve().parent
-RUN_DASHBOARD = SKILL_DIR / "run_dashboard.py"
+REPO = Path(__file__).resolve().parents[1]
+RUN_DASHBOARD = REPO / "observer_kit" / "run_dashboard.py"
+SKILL_DIR = REPO / "skills" / "observer-kit"
 REQUIRE_BROWSER = os.environ.get("OBSERVER_REQUIRE_BROWSER_TEST") == "1"
 
 try:

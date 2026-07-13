@@ -10,7 +10,8 @@ Exits non-zero on any failure.
 import os, sys, tempfile, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-LINT = os.path.join(HERE, 'references', 'lint_emit.py')
+REPO = os.path.dirname(HERE)
+LINT = os.path.join(REPO, 'observer_kit', 'lint_emit.py')
 passed, failed = 0, 0
 
 
@@ -504,6 +505,55 @@ def main():
                destination='planned')
 """)
 ok("dict self-merge silent discovery with terminal dump is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18l. AugAssign list growth (targets += [row]) then terminal dump.
+rc, out, err = run_lint("""
+from runguard import ledger
+def build():
+    targets = []
+    for page in source_pages:
+        for row in fetch_page(page):
+            targets += [row]
+    return targets
+def main():
+    for row in build():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("augassign list growth silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18m. Helper-mediated append on a non-result-named buffer.
+rc, out, err = run_lint("""
+from runguard import ledger
+def collect(buf, row):
+    buf.append(row)
+def build():
+    companies = []
+    for page in source_pages:
+        for row in fetch_page(page):
+            collect(companies, row)
+    return companies
+def main():
+    for row in build():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("helper-mediated append silent discovery is flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18n. Multi-source list comprehension builder then terminal dump.
+rc, out, err = run_lint("""
+from runguard import ledger
+def build():
+    return [row for page in source_pages for row in fetch_page(page)]
+def main():
+    for row in build():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("multi-source listcomp silent discovery is flagged",
    rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
 
 # 19. Qualified ledger calls pass when progress and stable rows advance together.

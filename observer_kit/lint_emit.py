@@ -398,8 +398,16 @@ def _looks_like_counter_rebind(value, name):
     return False
 
 
-def _loop_produces_entities(loop):
+def _loop_produces_entities(loop, functions=None):
+    """True when a loop accumulates business entities (not mere counters).
+
+    Detects subscript writes, collection mutations, self-merge rebinds,
+    ``buf += [...]`` / ``buf += chunk``, and helper calls that mutate a
+    bound buffer parameter (so silent discovery cannot hide behind
+    ``collect(companies, row)``).
+    """
     counter_names = {'progress', 'metrics', 'counts', 'counters', 'stats'}
+    functions = functions if functions is not None else {}
     for node in _body_nodes(loop):
         if isinstance(node, (ast.Yield, ast.YieldFrom)):
             return True
@@ -418,11 +426,67 @@ def _loop_produces_entities(loop):
                         continue
                     if _name_referenced_in(node.value, target.id):
                         return True
+            # targets += [row] / targets += chunk — AugAssign accumulation.
+            if isinstance(node, ast.AugAssign) and isinstance(node.op, (ast.Add,)):
+                target = node.target
+                if isinstance(target, ast.Name) and target.id not in counter_names:
+                    if not _looks_like_counter_rebind(
+                            ast.BinOp(left=ast.Name(id=target.id, ctx=ast.Load()),
+                                      op=node.op, right=node.value),
+                            target.id):
+                        # Counter-style ``n += 1`` only; list/dict/chunk grows entities.
+                        if isinstance(node.value, ast.Constant) and isinstance(
+                                node.value.value, (int, float)):
+                            continue
+                        return True
+                if isinstance(target, (ast.Attribute, ast.Subscript)):
+                    roots = _root_names(target)
+                    if roots and not roots <= counter_names:
+                        return True
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in COLLECTION_MUTATIONS):
             roots = _root_names(node.func.value)
             if roots and not roots <= counter_names:
                 return True
+        # Helper-mediated accumulation: collect(buf, row) where helper mutates buf.
+        if isinstance(node, ast.Call) and functions:
+            called = _called_name(node)
+            helper = functions.get(called)
+            if helper:
+                bindings = _call_bindings(node, helper)
+                for parameter in _mutated_parameters(helper, functions):
+                    roots = bindings.get(parameter, set())
+                    if roots and not roots <= counter_names:
+                        return True
+        # Nested list/set/dict/generator comprehensions that build collections
+        # inside a discovery loop (or as the whole body of a synthetic walk).
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            return True
+    return False
+
+
+def _is_multi_source_comprehension(value):
+    """Multi-generator comps are the usual silent full-scan discovery shape."""
+    if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+        return len(value.generators) >= 2
+    if isinstance(value, ast.DictComp):
+        return len(value.generators) >= 2
+    return False
+
+
+def _function_comprehension_discovery(fn):
+    """True when a helper builds a multi-source collection via comprehension.
+
+    Agents often write ``return [row for page in pages for row in page]`` with
+    no explicit For loop; the terminal dump then leaves the Data table empty
+    during discovery. Single-generator comps (map-like transforms) stay quiet.
+    """
+    for node in _body_nodes(fn):
+        if not isinstance(node, (ast.Return, ast.Assign, ast.AnnAssign)):
+            continue
+        value = getattr(node, 'value', None)
+        if _is_multi_source_comprehension(value):
+            return True
     return False
 
 
@@ -673,7 +737,7 @@ def _find_row_liveness_violations(tree, parents=None):
         has_heartbeat = _loop_emits_event(
             loop, 'heartbeat', functions, aliases=aliases,
             attr_aliases=attr_aliases)
-        produces = _loop_produces_entities(loop)
+        produces = _loop_produces_entities(loop, functions)
         if has_heartbeat:
             if not kinds:
                 violations.append(('ROW_LIVENESS_MISSING', loop.lineno))
@@ -685,6 +749,20 @@ def _find_row_liveness_violations(tree, parents=None):
             if _read_source_loop(loop, parents) is not None:
                 continue
             violations.append(('ROW_LIVENESS_MISSING', loop.lineno))
+    # Comprehension-only builders: no For/While, but discovery is still silent
+    # when another function later dumps planned records (terminal dump pattern).
+    module_has_outside_records = False
+    for fn in functions.values():
+        if _function_record_kinds(fn, functions):
+            module_has_outside_records = True
+            break
+    if module_has_outside_records:
+        for fn in functions.values():
+            if not _function_comprehension_discovery(fn):
+                continue
+            if _function_record_kinds(fn, functions):
+                continue
+            violations.append(('ROW_LIVENESS_MISSING', fn.lineno))
     return violations
 
 

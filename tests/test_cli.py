@@ -16,15 +16,19 @@ from urllib.request import Request, urlopen
 
 
 passed = failed = 0
-SKILL_ROOT = Path(__file__).resolve().parent
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SKILL_ROOT = REPO_ROOT / "skills" / "observer-kit"
+PACKAGE_ROOT = REPO_ROOT / "observer_kit"
 CLI_ENV = os.environ.copy()
 SOURCE_PACKAGE = REPO_ROOT / "observer_kit" / "__init__.py"
 SOURCE_CHECKOUT = (REPO_ROOT / "pyproject.toml").is_file()
+PACKAGE_ROOT = REPO_ROOT / "observer_kit"
+IMPORT_SHIMS = REPO_ROOT / "tests" / "import_shims"
 if SOURCE_PACKAGE.is_file():
-    # Source checkout: subprocesses intentionally run from a fresh target
-    # project, so preserve the package import path explicitly.
-    CLI_ENV["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + CLI_ENV.get("PYTHONPATH", "")
+    # Source checkout: package + legacy `import runguard` shim for worker snippets.
+    CLI_ENV["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT), str(IMPORT_SHIMS), CLI_ENV.get("PYTHONPATH", "")]
+    )
 
 cli_probe = subprocess.run(
     [sys.executable, "-B", "-c", "import observer_kit"],
@@ -123,14 +127,19 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
     project = Path(tmp) / "project"
     init = cli("init", str(project), "--force", cwd=Path.cwd())
     state = project / ".observer"
-    ok("init vendors workflow helpers", init.returncode == 0 and
-       (project / "runguard.py").is_file() and (project / "watch_chat.py").is_file())
-    ok("init creates a private state dir", (state / "EXPLAIN.md").is_file() and
-       (state / ".gitignore").read_text(encoding="utf-8") == "*.lock\n*.throttle\n*.jsonl\n")
-    ok("CLI init vendors byte-identical bundled helpers",
-       (project / "runguard.py").read_bytes() == (SKILL_ROOT / "runguard.py").read_bytes() and
-       (project / "watch_chat.py").read_bytes() == (SKILL_ROOT / "watch_chat.py").read_bytes() and
-       (state / "EXPLAIN.md").read_bytes() == (SKILL_ROOT / "EXPLAIN.md").read_bytes())
+    ok("init does not vendor product runtime by default",
+       init.returncode == 0
+       and not (project / "runguard.py").exists()
+       and not (project / "watch_chat.py").exists(),
+       init.stdout + init.stderr)
+    ok("init creates a private state dir",
+       (state / "EXPLAIN.md").is_file()
+       and (state / "runs").is_dir()
+       and (state / ".gitignore").read_text(encoding="utf-8")
+       == "*.lock\n*.throttle\n*.jsonl\n")
+    ok("init EXPLAIN template matches package template",
+       (state / "EXPLAIN.md").read_bytes()
+       == (PACKAGE_ROOT / "EXPLAIN.md").read_bytes())
 
     doctor = cli("doctor", str(project), cwd=project)
     ok("doctor accepts a fresh project", doctor.returncode == 0, doctor.stdout + doctor.stderr)
@@ -145,7 +154,7 @@ with tempfile.TemporaryDirectory(prefix="observer-cli-") as tmp:
         with urlopen(f"http://127.0.0.1:{port}/assets/dashboard.js", timeout=3) as response:
             dashboard_js = response.read()
             dashboard_js_type = response.headers.get_content_type()
-        expected_dashboard_js = (SKILL_ROOT / "assets" / "dashboard.js").read_bytes()
+        expected_dashboard_js = (PACKAGE_ROOT / "assets" / "dashboard.js").read_bytes()
         ok("CLI dashboard serves the bundled JavaScript asset byte-for-byte",
            dashboard_js_type == "application/javascript" and dashboard_js == expected_dashboard_js)
 

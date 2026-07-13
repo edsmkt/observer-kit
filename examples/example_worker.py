@@ -19,8 +19,10 @@ import json
 import os
 from pathlib import Path
 
-from runguard import (PendingWrite, RunPaused, input_snapshot, ledger,
-                      operation_key, start_observed_run, throttle)
+from observer_kit.runguard import (
+    PendingWrite, RunPaused, input_snapshot, ledger,
+    operation_key, start_observed_run, throttle,
+)
 
 
 TABLES = {

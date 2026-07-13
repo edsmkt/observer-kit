@@ -179,23 +179,26 @@ process; the script pauses at a checkpoint where it has recorded its progress.
 
 ## Install
 
-The repository ships two agent skills and one CLI. The Observer Kit skill
-contains the execution playbook and standalone Python helpers. The Observer
-Flow skill contains the graph-design and coordination playbook. The CLI makes
-setup, launch, watching, and checks shorter and repeatable for both. During
-agent-led setup, the skills check for the CLI, install it in a writable Python
-environment when needed, and verify it before initializing the project. The
-bundled helpers remain available for skill-only setups and environments where
-package installation is unavailable.
+The repository ships one installable Python package, two agent skills, and a
+CLI. **Product runtime** (runguard, dashboard, chat watch, lint) lives in the
+`observer_kit` package. The Observer Kit skill is the execution **playbook**;
+the Observer Flow skill is the graph-design playbook. Neither skill tree is the
+canonical home for product `.py` implementation.
+
+Install the package/CLI first. During agent-led setup, the skills probe for the
+CLI, install it in a writable Python environment when needed, and verify it
+before initializing the project. Skill trees ship playbook markdown only (no
+product runtime Python), matching a package-vs-skill split.
 
 The CLI keeps the established `observer-kit` command so existing projects and
 install instructions continue to work.
 
-Use the skills as the source of truth for operator behavior: how the agent
+Use the skills as the source of truth for operator **behavior**: how the agent
 selects a sample, interprets dashboard controls, fixes a run, and asks for
-full-run approval. Use the CLI as the repeatable local plumbing for the same
-contract. See the [install matrix](docs/install-matrix.md) for the supported
-paths and compatibility expectations.
+full-run approval. Use the package + CLI as the product runtime and repeatable
+plumbing for the same contract. See the
+[install matrix](docs/install-matrix.md) for the supported paths and
+compatibility expectations.
 
 Install the repository's skills for all local projects:
 
@@ -234,16 +237,18 @@ observer-kit init .
 observer-kit dashboard .observer --port 8484
 ```
 
-`init` adds the small Python helper, a private `.observer` state directory
-(with `runs/` for per-lane ledgers), and an `EXPLAIN.md` template. Keep the
-dashboard running while the agent works.
+`init` prepares a private `.observer` state directory (with `runs/` for
+per-lane ledgers) and an `EXPLAIN.md` template. It does **not** copy product
+runtime into the project; workflows import the observed-run API from the
+installed package. Keep the dashboard running while the agent works.
 
-With a skill-only installation, ask the agent to use Observer Kit's
-bundled-script path. It copies `runguard.py` and `watch_chat.py` beside the
-workflow, creates `.observer` (including `runs/`), copies the `EXPLAIN.md`
-template, and launches `run_dashboard.py` directly with its adjacent
-`assets/dashboard.js` file. The resulting locks, per-lane ledgers, controls,
-chat, and dashboard are the same as the CLI path.
+```python
+from observer_kit.runguard import start_observed_run
+```
+
+Package install is required for runtime. Create `.observer` (including `runs/`)
+with `observer-kit init`, seed `EXPLAIN.md`, and launch dashboard/watch through
+the CLI. Workflows import `observer_kit.runguard` rather than vendoring copies.
 
 Then ask your agent to wire Observer Kit into the real script. With the CLI, a
 typical first run is:
@@ -282,7 +287,7 @@ workflow's durable destination.
 For a new Python workflow, the helper keeps the integration small:
 
 ```python
-from runguard import start_observed_run
+from observer_kit.runguard import start_observed_run
 
 run = start_observed_run(
     'enrich-leads',
@@ -348,6 +353,7 @@ For dependency-driven workflows, see the
 
 ```bash
 observer-kit init [project]
+observer-kit lint workflow.py
 observer-kit dashboard [state_dir] --port 8484
 observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
 observer-kit watch .observer --run runguard:my-run --follow

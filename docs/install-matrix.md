@@ -1,15 +1,17 @@
 # Observer Install Matrix
 
-Observer has two distribution surfaces:
+Observer has three distribution surfaces:
 
-- **Agent skills**: the playbooks that tell an agent how to design, review,
-  pause, fix, and resume data work.
-- **CLI/runtime helpers**: the local plumbing that initializes a project,
-  launches the dashboard, runs commands, watches dashboard messages, and writes
-  the same JSONL ledger.
+- **Installable package** (`observer_kit`): product runtime — runguard API,
+  dashboard server, chat watch, lint. Import and CLI entry points live here.
+- **Agent skills**: playbooks for how an agent designs, reviews, pauses, fixes,
+  and resumes data work. Skill trees are not the canonical product implementation.
+- **CLI** (`observer-kit` / `python -m observer_kit`): repeatable local plumbing
+  that initializes a project, launches the dashboard, runs commands, watches
+  dashboard messages, and writes the same JSONL ledger.
 
-The skills are the source of truth for operator behavior. The CLI should make
-that behavior repeatable, not define a separate workflow.
+The skills are the source of truth for operator behavior. The package is the
+source of truth for product runtime. The CLI makes that behavior repeatable.
 
 ## Supported Paths
 
@@ -17,9 +19,9 @@ that behavior repeatable, not define a separate workflow.
 | --- | --- | --- | --- |
 | Global skills | `npx skills add edsmkt/observer-kit -g` | You want Observer available to agents in every local project. | Installs the Observer Kit and Observer Flow playbooks. The agent still probes for the CLI before setup. |
 | Project skills | `npx skills add edsmkt/observer-kit` | You want Observer available only in the current project. | Same playbooks, scoped to the project. Useful for teams that vendor skills with a repo. |
-| CLI from GitHub | `python3 -m pip install git+https://github.com/edsmkt/observer-kit.git` | You want the normal `observer-kit` command without cloning this repo. | Provides `observer-kit init`, `dashboard`, `run`, `watch`, `reply`, `doctor`, and `test`. Wheels keep their helper bundle inside the `observer_kit` package, including user and custom-target installs. |
-| Editable checkout | `python3 -m pip install -e .` | You are developing Observer itself or testing local changes. | Provides the same CLI from this checkout. `python3 -m observer_kit --help` should also work. |
-| Skill-only bundled helpers | Agent copies `runguard.py`, `watch_chat.py`, `run_dashboard.py`, `assets/dashboard.js`, and `EXPLAIN.md` from the installed skill. | Package installation is unavailable or the user chooses a vendored setup. | Produces the same local ledger, controls, dashboard, and watcher semantics as the CLI path. Keep the asset beside the script at `assets/dashboard.js`. |
+| CLI from GitHub | `python3 -m pip install git+https://github.com/edsmkt/observer-kit.git` | You want the normal `observer-kit` command without cloning this repo. | Provides package imports (`observer_kit.runguard`) and `observer-kit init`, `dashboard`, `run`, `watch`, `reply`, `lint`, `doctor`, and `test`. Wheels ship runtime under the `observer_kit` package. |
+| Editable checkout | `python3 -m pip install -e .` | You are developing Observer itself or testing local changes. | Provides the same CLI and package from this checkout. `python3 -m observer_kit --help` should also work. |
+| Deprecated `--vendor` init | `observer-kit init . --vendor` | Temporary bridge for workflows that still expect local `runguard.py`. | Copies package modules into the project; doctor warns. Prefer package import. Skill trees never ship product `.py`. |
 
 ## Compatibility Contract
 
@@ -38,9 +40,9 @@ All install paths should agree on these observable behaviors:
   full-run approval.
 - Full runs require explicit operator approval after a bounded dry-run sample.
 
-When changing runtime behavior, update the skill playbooks first or in the same
-change. When changing the playbooks, keep the CLI examples and bundled helpers
-aligned with the same contract.
+When changing runtime behavior, update package modules and skill playbooks in
+the same change. When changing the playbooks, keep CLI examples and package
+import paths aligned with the same contract.
 
 ## Source Of Truth
 
