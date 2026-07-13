@@ -365,8 +365,23 @@ observer-kit ps .observer                                 # list dashboards/watc
 observer-kit stop --orphans                               # dead-parent processes
 observer-kit stop --sweep .observer                       # end-of-session cleanup
 observer-kit validate-flow pipeline.flow.json             # Flow graph structure
+observer-kit axi --state-dir .observer                    # agent home (TOON)
+observer-kit axi runs --state-dir .observer
+observer-kit axi run --state-dir .observer --id runguard:lane
 observer-kit doctor [project]
 observer-kit test
+```
+
+### Agent AXI
+
+Agents should prefer the **`observer-kit axi`** surface for orientation (runs,
+orphans, next steps) with dense TOON on stdout. Human visual review stays on
+`observer-kit dashboard`. Example:
+
+```bash
+observer-kit axi --state-dir .observer
+observer-kit axi runs --state-dir .observer
+observer-kit poll .observer --all
 ```
 
 Run the full acceptance suite from this repository with:

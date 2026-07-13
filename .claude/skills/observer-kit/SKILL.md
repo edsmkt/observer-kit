@@ -208,13 +208,10 @@ observer-kit watch .observer --all --follow
 observer-kit run --state-dir .observer -- python3 workflow.py --full-run
 ```
 
-For interactive dashboard chat, use the AXI-style **poll** loop so the UI shows
-**listening** while you wait (`poll` → note → `reply` → `poll` again). Watcher
-ownership refuses overlapping bridges; parent-owned watchers exit with their CLI
-process. Prefer one dashboard; bind ephemerals with `--parent-pid` /
-`--idle-timeout`; end sessions with `observer-kit stop --sweep .observer`.
-Treat watcher/poll output as transport into the current agent session. Inspect
-the script, JSONL, durable sink, and destination before replying or changing the run.
+Orient with **`observer-kit axi`** (TOON status/runs/orphans). For chat, use the
+**poll** loop (`poll` → note → `reply` → `poll`). Watcher ownership refuses
+overlapping bridges. Prefer one dashboard; end with
+`observer-kit stop --sweep .observer`. Treat poll output as session transport.
 
 **Complete when:** the full run has an explicit operator approval, live
 monitoring, a terminal ledger event, reconciled receipts, and a concise outcome
@@ -242,9 +239,7 @@ dashboard view.
 
 - [`references/pattern.md`](references/pattern.md): production integration and
   operation contract; read in full for workflow design and adaptation.
-- Package runtime: `observer_kit.runguard`, dashboard, watch, `observer-kit lint`.
-  Import and launch only via package/CLI.
-- `EXPLAIN.md`: project-specific statement of intent shown to the operator.
+- Package runtime: `observer_kit.runguard`, dashboard, watch, lint, **axi**.
+- `EXPLAIN.md`: project-specific intent for the operator.
 
-With the CLI helper, run `observer-kit doctor .` after setup and `observer-kit test`
-after core changes.
+Run `observer-kit axi doctor .` after setup and `observer-kit test` after core changes.

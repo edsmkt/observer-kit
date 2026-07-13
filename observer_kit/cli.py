@@ -174,6 +174,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         [sys.executable, "-B", str(tests_dir / "test_dashboard.py")],
         [sys.executable, "-B", str(tests_dir / "test_dashboard_browser.py")],
         [sys.executable, "-B", str(tests_dir / "test_cli.py")],
+        [sys.executable, "-B", str(tests_dir / "test_axi.py")],
     ]
     if flow_skill_dir.is_dir():
         tests.extend([
@@ -1284,6 +1285,263 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- AXI (agent eXperience interface) -----------------------------------------
+
+def cmd_axi(args: argparse.Namespace) -> int:
+    """Agent-ergonomic surface: TOON stdout, next-step help, no interactive prompts."""
+    from observer_kit import axi as axi_mod
+
+    action = getattr(args, "axi_command", None) or "home"
+    state_dir = Path(getattr(args, "state_dir", ".observer") or ".observer")
+    state_dir = state_dir.expanduser().resolve()
+
+    if action == "home":
+        return _axi_home(state_dir, port=getattr(args, "port", 8484))
+    if action == "runs":
+        return _axi_runs(state_dir)
+    if action == "run":
+        return _axi_run_detail(state_dir, getattr(args, "id", None) or getattr(args, "run_id", None))
+    if action == "doctor":
+        return _axi_doctor(
+            Path(getattr(args, "project", ".") or "."),
+            getattr(args, "state_dir_name", None) or state_dir.name,
+        )
+    if action == "ps":
+        return _axi_ps(state_dir, scan=not getattr(args, "no_scan", False))
+    if action == "help":
+        return _axi_help()
+    # Unknown subcommand should not reach here (argparse), but fail loud.
+    from observer_kit.axi import emit, toon_kv, toon_help
+    emit(
+        toon_kv("error", f"unknown axi command: {action}"),
+        toon_help(["observer-kit axi help"]),
+    )
+    return 2
+
+
+def _axi_home(state_dir: Path, *, port: int = 8484) -> int:
+    from observer_kit.axi import (
+        default_help,
+        emit,
+        list_runs,
+        probe_dashboard,
+        toon_help,
+        toon_kv,
+        toon_table,
+    )
+
+    runs = list_runs(state_dir) if state_dir.is_dir() else []
+    live_runs = [r for r in runs if r.get("live")]
+    dashboards = _dashboard_records([state_dir] if state_dir.is_dir() else None, scan_ports=True)
+    watchers = _watcher_records(state_dir) if state_dir.is_dir() else []
+    orphans = sum(1 for r in dashboards + watchers if r.get("orphan"))
+    dash = probe_dashboard(port)
+    if dash is None:
+        # try first live dashboard from inventory
+        for rec in dashboards:
+            if rec.get("pid_alive") and rec.get("port"):
+                dash = {"port": rec.get("port"), "state_dir": rec.get("state_dir"),
+                        "pid": rec.get("pid")}
+                break
+
+    blocks = [
+        toon_kv("surface", "observer-axi"),
+        toon_kv("state_dir", str(state_dir) if state_dir.is_dir() else f"missing:{state_dir}"),
+        toon_kv("state_ok", state_dir.is_dir()),
+        toon_kv("runs", len(runs)),
+        toon_kv("live", len(live_runs)),
+        toon_kv("orphans", orphans),
+        toon_kv(
+            "dashboard",
+            f"http://127.0.0.1:{dash.get('port')}/" if dash and dash.get("port") else "none",
+        ),
+    ]
+    if live_runs:
+        blocks.append(
+            toon_table(
+                "live_runs",
+                live_runs[:10],
+                ["id", "status", "records", "desc"],
+            )
+        )
+    elif runs:
+        blocks.append(
+            toon_table(
+                "recent_runs",
+                runs[:5],
+                ["id", "live", "status", "records", "desc"],
+            )
+        )
+    else:
+        blocks.append(toon_kv("runs_note", "0 runs in state dir"))
+
+    if orphans:
+        blocks.append(toon_kv("orphan_note", f"{orphans} orphan process(es)"))
+
+    helps = default_help(str(state_dir), live=len(live_runs), orphans=orphans)
+    if not state_dir.is_dir():
+        helps = [
+            f"observer-kit init . --state-dir {state_dir.name}",
+            "python -m pip install -e .",
+            "observer-kit axi doctor .",
+        ]
+    blocks.append(toon_help(helps))
+    emit(*blocks)
+    return 0 if state_dir.is_dir() else 1
+
+
+def _axi_runs(state_dir: Path) -> int:
+    from observer_kit.axi import default_help, emit, list_runs, toon_help, toon_kv, toon_table
+
+    if not state_dir.is_dir():
+        emit(
+            toon_kv("error", f"state dir missing: {state_dir}"),
+            toon_help([f"observer-kit init . --state-dir {state_dir.name}"]),
+        )
+        return 1
+    runs = list_runs(state_dir)
+    emit(
+        toon_kv("state_dir", str(state_dir)),
+        toon_kv("count", len(runs)),
+        toon_table(runs and "runs" or "runs", runs, ["id", "live", "status", "records", "desc"]),
+        toon_help(default_help(str(state_dir), live=sum(1 for r in runs if r.get("live")))),
+    )
+    return 0
+
+
+def _axi_run_detail(state_dir: Path, run_id: str | None) -> int:
+    from observer_kit.axi import emit, get_run, toon_help, toon_kv
+
+    if not run_id:
+        emit(
+            toon_kv("error", "run id required"),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 2
+    if not state_dir.is_dir():
+        emit(toon_kv("error", f"state dir missing: {state_dir}"))
+        return 1
+    run = get_run(state_dir, run_id)
+    if not run:
+        emit(
+            toon_kv("error", f"run not found: {run_id}"),
+            toon_kv("state_dir", str(state_dir)),
+            toon_help([f"observer-kit axi runs --state-dir {state_dir}"]),
+        )
+        return 1
+    emit(
+        toon_kv("id", run["id"]),
+        toon_kv("lane", run["lane"]),
+        toon_kv("live", run["live"]),
+        toon_kv("status", run["status"]),
+        toon_kv("records", run["records"]),
+        toon_kv("desc", run["desc"]),
+        toon_kv("mtime", run["mtime"]),
+        toon_help([
+            f"observer-kit poll {state_dir} --run {run['id']}",
+            f"observer-kit dashboard {state_dir}",
+            f"observer-kit axi runs --state-dir {state_dir}",
+        ]),
+    )
+    return 0
+
+
+def _axi_doctor(project: Path, state_name: str) -> int:
+    from observer_kit.axi import emit, toon_help, toon_kv, toon_table
+
+    project = project.expanduser().resolve()
+    state = project / state_name
+    checks = [
+        {"check": "project_exists", "ok": project.exists()},
+        {"check": "package_runguard", "ok": package_file("runguard.py").exists()},
+        {"check": "package_dashboard", "ok": package_file("run_dashboard.py").exists()},
+        {"check": "package_watcher", "ok": package_file("watch_chat.py").exists()},
+        {"check": "state_dir", "ok": state.exists()},
+        {"check": "state_gitignore", "ok": (state / ".gitignore").exists()},
+        {"check": "explain", "ok": (state / "EXPLAIN.md").exists()},
+        {"check": "runs_home", "ok": (state / "runs").is_dir()},
+    ]
+    ok = all(c["ok"] for c in checks)
+    emit(
+        toon_kv("project", str(project)),
+        toon_kv("state_dir", str(state)),
+        toon_kv("ok", ok),
+        toon_table("checks", checks, ["check", "ok"]),
+        toon_help(
+            [f"observer-kit init {project}", "python -m pip install -e ."]
+            if not ok
+            else [
+                f"observer-kit axi --state-dir {state}",
+                f"observer-kit dashboard {state}",
+            ]
+        ),
+    )
+    return 0 if ok else 1
+
+
+def _axi_ps(state_dir: Path, *, scan: bool) -> int:
+    from observer_kit.axi import emit, toon_help, toon_kv, toon_table
+
+    dirs = [state_dir] if state_dir.is_dir() else []
+    dashboards = _dashboard_records(dirs or None, scan_ports=scan)
+    watchers = _watcher_records(state_dir) if state_dir.is_dir() else []
+    dash_rows = [
+        {
+            "port": d.get("port"),
+            "pid": d.get("pid"),
+            "orphan": bool(d.get("orphan")),
+            "state": d.get("state_dir"),
+        }
+        for d in dashboards
+    ]
+    watch_rows = [
+        {
+            "pid": w.get("pid"),
+            "orphan": bool(w.get("orphan")),
+            "target": "all" if w.get("mode") == "all" else w.get("run"),
+            "state": w.get("state_dir"),
+        }
+        for w in watchers
+    ]
+    orphans = sum(1 for r in dash_rows + watch_rows if r.get("orphan"))
+    emit(
+        toon_kv("dashboards", len(dash_rows)),
+        toon_kv("watchers", len(watch_rows)),
+        toon_kv("orphans", orphans),
+        toon_table("dashboard", dash_rows, ["port", "pid", "orphan", "state"])
+        if dash_rows
+        else toon_kv("dashboard_note", "0 dashboards"),
+        toon_table("watcher", watch_rows, ["pid", "orphan", "target", "state"])
+        if watch_rows
+        else toon_kv("watcher_note", "0 watchers"),
+        toon_help(
+            [f"observer-kit stop --sweep {state_dir}"]
+            if orphans
+            else [f"observer-kit axi --state-dir {state_dir}", f"observer-kit dashboard {state_dir}"]
+        ),
+    )
+    return 0
+
+
+def _axi_help() -> int:
+    from observer_kit.axi import emit, toon_help, toon_kv
+
+    emit(
+        toon_kv("surface", "observer-axi"),
+        toon_kv("desc", "Agent eXperience Interface for Observer Kit"),
+        toon_help([
+            "observer-kit axi [--state-dir .observer]",
+            "observer-kit axi runs --state-dir .observer",
+            "observer-kit axi run --state-dir .observer --id runguard:<lane>",
+            "observer-kit axi doctor .",
+            "observer-kit axi ps --state-dir .observer",
+            "observer-kit poll .observer --all",
+            "observer-kit stop --sweep .observer",
+        ]),
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="observer-kit",
@@ -1298,10 +1556,71 @@ def build_parser() -> argparse.ArgumentParser:
   observer-kit ps .observer
   observer-kit stop --sweep .observer
   observer-kit validate-flow pipeline.flow.json
+  observer-kit axi --state-dir .observer
+  observer-kit axi runs --state-dir .observer
   observer-kit test
 """,
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    axi = sub.add_parser(
+        "axi",
+        help="agent eXperience interface (TOON stdout, next-step help)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""AXI is for agents: dense TOON on stdout, no interactive prompts.
+
+examples:
+  observer-kit axi
+  observer-kit axi --state-dir .observer
+  observer-kit axi runs --state-dir .observer
+  observer-kit axi run --state-dir .observer --id runguard:my-lane
+  observer-kit axi doctor .
+  observer-kit axi ps --state-dir .observer
+  observer-kit axi help
+
+Human visual review stays on the dashboard:
+  observer-kit dashboard .observer
+""",
+    )
+    axi.add_argument(
+        "--state-dir",
+        default=".observer",
+        help="ledger/state directory (default .observer)",
+    )
+    axi.add_argument(
+        "--port",
+        type=int,
+        default=8484,
+        help="dashboard port to probe for home view",
+    )
+    axi_sub = axi.add_subparsers(dest="axi_command")
+
+    axi_home = axi_sub.add_parser("home", help="home view (default when no subcommand)")
+    axi_home.set_defaults(axi_command="home")
+
+    axi_runs = axi_sub.add_parser("runs", help="list runs in a state dir")
+    axi_runs.add_argument("--state-dir", default=".observer")
+    axi_runs.set_defaults(axi_command="runs")
+
+    axi_run = axi_sub.add_parser("run", help="detail one run")
+    axi_run.add_argument("--state-dir", default=".observer")
+    axi_run.add_argument("--id", dest="id", required=True, help="run id, e.g. runguard:lane")
+    axi_run.set_defaults(axi_command="run")
+
+    axi_doc = axi_sub.add_parser("doctor", help="TOON doctor for a project")
+    axi_doc.add_argument("project", nargs="?", default=".")
+    axi_doc.add_argument("--state-dir", dest="state_dir_name", default=".observer")
+    axi_doc.set_defaults(axi_command="doctor")
+
+    axi_ps = axi_sub.add_parser("ps", help="TOON process inventory")
+    axi_ps.add_argument("--state-dir", default=".observer")
+    axi_ps.add_argument("--no-scan", action="store_true")
+    axi_ps.set_defaults(axi_command="ps")
+
+    axi_help = axi_sub.add_parser("help", help="concise AXI command list")
+    axi_help.set_defaults(axi_command="help")
+
+    axi.set_defaults(func=cmd_axi, axi_command="home")
 
     init = sub.add_parser(
         "init",
