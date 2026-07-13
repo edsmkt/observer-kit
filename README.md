@@ -422,18 +422,24 @@ Use the Observer Kit skill for sample, locks, and full-run approval.
 Use observer-kit dashboard for the human; do not scrape the HTML.
 ```
 
-### Side-effect compliance hook
+### Side-effect compliance hooks
 
-This repo ships a Claude Code **PreToolUse** hook that blocks Write / Read /
-Bash when the agent touches a **side-effect** script (CRM/API writes, DB
-mutations, webhooks, metered loops, …) that is **not** under Observer Kit.
+This repo ships Claude Code hooks for Observer compliance:
+
+1. **UserPromptSubmit** — if you say e.g. “no need to use observer kit”, injects
+   a note so the agent stamps `# observer: ignore` on side-effect files.
+2. **PreToolUse** — blocks Write / Read / Bash on **side-effect** scripts
+   (CRM/API writes, DB mutations, webhooks, metered loops, …) that are **not**
+   under Observer Kit, unless the file has `# observer: ignore`.
 
 - Gate engine: `observer-kit gate path.py` or `observer-kit gate --command '…'`
-- Hook script: [`.claude/hooks/observer-gate.sh`](.claude/hooks/observer-gate.sh)
+- Hooks: [`.claude/hooks/observer-gate.sh`](.claude/hooks/observer-gate.sh),
+  [`.claude/hooks/observer-opt-out.py`](.claude/hooks/observer-opt-out.py)
 - Project settings: [`.claude/settings.json`](.claude/settings.json)
 
-Escape hatch in a file: `# observer: ignore`. Prefer wiring
-`start_observed_run` and launching with `observer-kit run --state-dir .observer -- …`.
+Prefer wiring `start_observed_run` and launching with
+`observer-kit run --state-dir .observer -- …`. Use `# observer: ignore` only when
+you intentionally opt out.
 
 Run the full acceptance suite from this repository with:
 
