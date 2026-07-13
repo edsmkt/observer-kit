@@ -279,6 +279,14 @@ concise `error` for outcomes that need operator attention and `error=''` for
 healthy or expected outcomes. Build the dry-run preview as a stratified sample
 so uncommon holds, missing entities, and failures remain inspectable.
 
+**Live table during slow phases.** `progress`, `metric`, and `run.count()` are
+heartbeats. The Data table advances on `record` events. During multi-page
+discovery or long enrichment, emit stable business rows (or a phase row before
+an entity key exists) in the same loop that spends time — including dry-run
+`destination='planned'` rows. Heartbeats for minutes followed by a post-discovery
+planned-record dump fail the sample gate and `lint_emit.py` (ROW LIVENESS
+MISSING).
+
 `run.step(name, **fields)` reserves `name` for the step label. Use `label` or
 `entity_name` for a business name during the step, then emit the operator-facing
 `name` field in the completed record or receipt update.

@@ -7,8 +7,10 @@
     reporting progress while the actual result remains memory-only until a
     final write. A live dashboard is not a durable resume point.
 
-    reporting progress from a repeated slow phase while its record/table
-    surface stays empty until a terminal preview flush.
+    reporting progress (or metric/count heartbeats) from a repeated slow
+    phase while its record/table surface stays empty until a terminal
+    preview flush — the operator watches an empty dashboard table for the
+    entire discovery phase.
 
     satisfying table liveness with synthetic phase rows while discovered
     business entities remain invisible until completion.
@@ -82,6 +84,11 @@ def _is_ledger_event_call(node, event):
             return True
         if event == 'progress' and node.func.attr == 'progress':
             return True
+        if event == 'metric' and node.func.attr == 'metric':
+            return True
+        if event == 'metric' and node.func.attr == 'count':
+            # run.count() emits metric events; list/str .count() must not match.
+            return _is_observed_receiver(node.func.value)
         if node.func.attr == 'step':
             for kw in node.keywords:
                 if (kw.arg == 'event' and isinstance(kw.value, ast.Constant)
@@ -92,6 +99,90 @@ def _is_ledger_event_call(node, event):
 
 def _is_ledger_record_call(node):
     return _is_ledger_event_call(node, 'record')
+
+
+HEARTBEAT_METHOD_ATTRS = frozenset({'progress', 'count', 'metric'})
+# Unresolved Name() calls with these stems are treated as heartbeats so imported
+# helpers like tick()/emit_progress() cannot hide a progress-only discovery loop.
+HEARTBEAT_NAME_STEMS = ('progress', 'heartbeat', 'metric', 'tick', 'pace')
+# Receivers that look like ObservedRun / runguard — avoid list/str .count() FPs.
+OBSERVED_RECEIVER_NAMES = frozenset({
+    'run', 'runguard', 'rg', 'self', 'observed', 'guard', 'obs',
+})
+
+
+def _is_observed_receiver(node):
+    """True when the attribute base is likely an ObservedRun / runguard handle."""
+    if isinstance(node, ast.Name):
+        name = node.id
+        return (
+            name in OBSERVED_RECEIVER_NAMES
+            or name.endswith('_run')
+            or name.endswith('Run')
+            or name.startswith('run_')
+        )
+    if isinstance(node, ast.Attribute):
+        return (
+            node.attr in OBSERVED_RECEIVER_NAMES
+            or node.attr.endswith('_run')
+            or _is_observed_receiver(node.value)
+        )
+    return False
+
+
+def _heartbeat_aliases(tree):
+    """Names bound to run.count / run.progress / similar method references."""
+    aliases = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            value, targets = node.value, node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            value, targets = node.value, [node.target]
+        else:
+            continue
+        if not (isinstance(value, ast.Attribute) and value.attr in HEARTBEAT_METHOD_ATTRS):
+            continue
+        if value.attr == 'count' and not _is_observed_receiver(value.value):
+            # Do not alias list/str .count into heartbeat tracking.
+            continue
+        if value.attr in ('progress', 'metric') or _is_observed_receiver(value.value):
+            for target in targets:
+                aliases.update(_target_names(target))
+    return aliases
+
+
+def _is_heartbeat_call(node, aliases=None, functions=None):
+    """Progress/metric/count signals that advance without filling data tables.
+
+    Also treats (1) aliases bound to those methods and (2) unresolved Name calls
+    whose identifier looks like a heartbeat helper, so imported tick()/progress
+    wrappers do not false-negative ROW LIVENESS checks.
+
+    ``list.count`` / ``str.count`` are excluded so ordinary collection helpers
+    do not trip ROW LIVENESS (F2 residual).
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    aliases = aliases or set()
+    functions = functions or {}
+    if _is_ledger_event_call(node, 'progress') or _is_ledger_event_call(node, 'metric'):
+        return True
+    if isinstance(node.func, ast.Attribute) and node.func.attr in HEARTBEAT_METHOD_ATTRS:
+        attr = node.func.attr
+        # progress/metric are Observer Kit dashboard events; count collides with
+        # list/str .count(), so require an ObservedRun-like receiver.
+        if attr in ('progress', 'metric'):
+            return True
+        return _is_observed_receiver(node.func.value)
+    if isinstance(node.func, ast.Name):
+        name = node.func.id
+        if name in aliases:
+            return True
+        if name not in functions:
+            low = name.lower()
+            if any(stem in low for stem in HEARTBEAT_NAME_STEMS):
+                return True
+    return False
 
 
 def _summary_metric_violations(tree):
@@ -299,8 +390,9 @@ def analyze(path):
     # Find the loop(s) that mutate a results container (the "work" loop)
     work_entries = _find_result_mutating_loops(tree, work_names, parents)
 
-    # Progress is a companion surface. Repeated progress from a slow loop must
-    # advance at least one stable entity or phase row in that same loop path.
+    # Heartbeats (progress/metric/count) are a companion surface. Repeated
+    # heartbeats from a slow loop must advance at least one stable entity or
+    # phase row in that same loop path — not only a terminal record dump.
     row_liveness_violations = _find_row_liveness_violations(tree)
     summary_violations = _summary_metric_violations(tree)
     limit_violations = _sample_limit_violations(tree)
@@ -391,39 +483,60 @@ def _body_nodes(node):
         stack.extend(ast.iter_child_nodes(current))
 
 
-def _function_emits_event(fn, event, functions, seen=None):
+def _function_emits_event(fn, event, functions, seen=None, aliases=None):
     seen = set(seen or ())
     if fn.name in seen:
         return False
     seen.add(fn.name)
+    aliases = aliases or set()
     for node in _body_nodes(fn):
         if not isinstance(node, ast.Call):
             continue
-        if _is_ledger_event_call(node, event):
+        if event == 'heartbeat':
+            if _is_heartbeat_call(node, aliases=aliases, functions=functions):
+                return True
+        elif _is_ledger_event_call(node, event):
             return True
         helper = functions.get(_called_name(node))
-        if helper and _function_emits_event(helper, event, functions, seen):
+        if helper and _function_emits_event(
+                helper, event, functions, seen, aliases=aliases):
             return True
     return False
 
 
-def _loop_emits_event(loop, event, functions):
+def _loop_emits_event(loop, event, functions, aliases=None):
+    aliases = aliases or set()
     for node in _body_nodes(loop):
         if not isinstance(node, ast.Call):
             continue
-        if _is_ledger_event_call(node, event):
+        if event == 'heartbeat':
+            if _is_heartbeat_call(node, aliases=aliases, functions=functions):
+                return True
+        elif _is_ledger_event_call(node, event):
             return True
         helper = functions.get(_called_name(node))
-        if helper and _function_emits_event(helper, event, functions):
+        if helper and _function_emits_event(
+                helper, event, functions, aliases=aliases):
             return True
     return False
 
 
 def _find_row_liveness_violations(tree):
+    """Flag slow loops that stream heartbeats without advancing the data table.
+
+    Heartbeats include ledger('progress'), ledger('metric'), run.progress(),
+    run.count(), aliases of those methods, and unresolved helpers named like
+    tick/emit_progress. Progress-only discovery with a terminal planned-record
+    dump is the production failure mode this catches.
+    """
     functions = _function_defs(tree)
+    aliases = _heartbeat_aliases(tree)
     violations = []
     for loop in ast.walk(tree):
-        if not isinstance(loop, LOOP_TYPES) or not _loop_emits_event(loop, 'progress', functions):
+        if not isinstance(loop, LOOP_TYPES):
+            continue
+        # Single heartbeat probe covers progress/metric/count + aliases/helpers.
+        if not _loop_emits_event(loop, 'heartbeat', functions, aliases=aliases):
             continue
         kinds = _loop_record_kinds(loop, functions)
         if not kinds:
@@ -842,9 +955,10 @@ def main():
         print('  but no durable result write is visible there. Progress events do not')
         print('  protect paid work from a crash or make --resume skip it.')
     if any(kind == 'ROW_LIVENESS_MISSING' for kind, _ in violations):
-        print('  ROW LIVENESS MISSING: a repeated loop emits progress while its')
-        print('  record/table surface stays unchanged. A terminal preview dump leaves')
-        print('  the operator with an empty table during the slow phase.')
+        print('  ROW LIVENESS MISSING: a repeated loop emits progress/metric/count')
+        print('  heartbeats while its record/table surface stays unchanged. A terminal')
+        print('  preview dump leaves the operator with an empty table during the')
+        print('  entire slow discovery phase (often many minutes).')
     if any(kind == 'BUSINESS_ROW_LIVENESS_MISSING' for kind, _ in violations):
         print('  BUSINESS ROW LIVENESS MISSING: a repeated loop discovers or')
         print('  accumulates entities, but only a synthetic phase row advances.')
@@ -874,8 +988,10 @@ def main():
         print('  Durability fix: persist the result and emit its record in the same item')
         print('  loop or completion callback, then checkpoint after that boundary.')
     if any(kind == 'ROW_LIVENESS_MISSING' for kind, _ in violations):
-        print('  Liveness fix: emit a stable entity or phase record from each progress')
-        print('  loop, then update that same table/key as later fields become known.')
+        print('  Liveness fix: emit a stable entity or phase record from each slow')
+        print('  discovery/progress loop (especially dry-run planned rows), then')
+        print('  update that same table/key as later fields become known. Do not')
+        print('  wait until build_targets() returns to flush every planned record.')
     if any(kind == 'BUSINESS_ROW_LIVENESS_MISSING' for kind, _ in violations):
         print('  Business-row fix: emit representative entity rows as discovery or')
         print('  classification lands; reserve phase rows for phases with no entity yet.')
@@ -897,7 +1013,7 @@ def main():
     print()
     for fname, lineno in violations:
         if fname == 'ROW_LIVENESS_MISSING':
-            print(f'  - progress loop at line {lineno} has no record-row path')
+            print(f'  - heartbeat loop at line {lineno} has no record-row path')
         elif fname == 'BUSINESS_ROW_LIVENESS_MISSING':
             print(f'  - entity-producing progress loop at line {lineno} emits only phase rows')
         elif fname == 'SUMMARY_METRICS_MISSING':

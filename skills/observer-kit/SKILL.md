@@ -12,15 +12,14 @@ work, and the watcher carries operator messages back to the active session.
 
 Build every run around two guarantees:
 
-- **Liveness**: JSONL events advance while work happens so the dashboard stays current.
-- **Durability**: completed results reach a re-readable sink at a durable boundary so
-  a restart continues from saved work. Ledger rows, write receipts, controls, and
-  throttle claims are fsync'd after append; resume trusts that disk boundary over
-  process memory.
+- **Liveness**: JSONL events and table rows advance while work happens so the
+  dashboard stays current.
+- **Durability**: completed results reach a re-readable sink at a durable boundary
+  (fsync'd ledger rows, receipts, controls, throttles) so resume continues from disk.
 
-Route every external mutation through `write_intent` / `write_receipt` (and optional
-`validate` / `allow_write`) for dry-run honesty. Use `RUNGUARD_SESSION` for a separate
-ledger **and** lock so comparison or redo lanes stay independent on the same source.
+Route external mutations through `write_intent` / `write_receipt` (and optional
+`validate` / `allow_write`). Use `RUNGUARD_SESSION` for a separate ledger and lock
+on comparison or redo lanes.
 
 ## 1. Load The Right Context
 
@@ -119,21 +118,21 @@ Apply the production contracts from `references/pattern.md`:
    version in the manifest.
 3. Use the first bounded read to call `run.schema_sample()` with the decoded real
    response body; let `--dry-run --limit` stop the earliest query/page/batch.
-4. Emit stable business rows as source items and classifications become known; reserve phase rows for work that has no business key yet, then update the same keys.
-5. Use the durable boundary order: perform work, persist the real result, emit
-   the row, then checkpoint the completed key or chunk.
-6. Wrap each external delivery with validation, policy checks, write intent,
-   confirmed sink call, and write receipt. Update the same business row's
-   destination field from `pending` to its confirmed outcome.
-7. Consume structured dashboard controls at loop boundaries and after completed writes; dashboard chat remains input for the active agent session.
-8. Pace shared provider accounts with `throttle()` and enforce hard spend/write
-   ceilings in code.
+4. Emit stable business rows as source items and classifications become known;
+   reserve phase rows for work that has no business key yet, then update the
+   same keys. Stream those rows during multi-page discovery and dry-run planning
+   so the Data table advances with each heartbeat phase.
+5. Durable boundary order: work → persist real result → emit row → checkpoint.
+6. Wrap each external delivery with validation, policy, write intent, confirmed
+   sink call, and write receipt; update the same row's destination field.
+7. Consume structured dashboard controls at loop boundaries and after completed
+   writes; dashboard chat remains input for the active agent session.
+8. Pace shared providers with `throttle()` and enforce hard spend/write ceilings.
 
-For a phase-batched pipeline, persist each finalized item or bounded chunk when
-that phase produces authoritative output; resume selects remaining work from it.
-When one bounded unit uses internal pagination, keep the accumulator scoped to
-that unit and persist it immediately after its final page, before the next unit
-begins. Startup replay may rebuild working maps from this durable store.
+For phase-batched pipelines, persist each finalized item or bounded chunk when
+that phase produces authoritative output. Scope internal pagination to one unit
+and persist after its final page before the next unit; startup replay may rebuild
+maps from that durable store.
 
 **Complete when:** dry-run work stops at its sample boundary; stopping one line
 before the final statement loses at most the active item or bounded chunk, and
@@ -157,7 +156,9 @@ python3 references/lint_emit.py /absolute/path/to/workflow.py
 
 Exercise the real sample and verify this universal minimum:
 
-- each slow phase emits a record before its terminal event while rows and the durable store advance;
+- each slow phase emits a record before its terminal event while rows and the
+  durable store advance (stream table rows during discovery and dry-run planning;
+  heartbeats accompany rows; a post-discovery planned dump fails the sample);
 - the bounded schema sample opens as full JSON and its projected columns match user review;
 - scalar headline counts reconcile with stratified write, skip, hold, missing, and failure rows;
 - the sample limit bounds the earliest query, page, batch, or provider loop;
@@ -241,10 +242,8 @@ dashboard view.
 
 - [`references/pattern.md`](references/pattern.md): production integration and
   operation contract; read in full for workflow design and adaptation.
-- [`references/lint_emit.py`](references/lint_emit.py): static check for final
-  flushes and progress paired with memory-buffered results; run before every full dataset.
-- `runguard.py`, `run_dashboard.py`, `watch_chat.py`: vendored runtime, localhost
-  dashboard, and chat transport for the active agent harness.
+- [`references/lint_emit.py`](references/lint_emit.py): static check for final flushes, row liveness, and durable work loops; run before every full dataset.
+- `runguard.py`, `run_dashboard.py`, `watch_chat.py`: vendored runtime, dashboard, chat transport.
 - `EXPLAIN.md`: project-specific statement of intent shown to the operator.
 
 With the CLI helper, run `observer-kit doctor .` after setup and `observer-kit test` after core changes. The bundled-script path runs the matching `test_*.py` files.

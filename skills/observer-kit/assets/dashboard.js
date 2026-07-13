@@ -1100,8 +1100,16 @@ function render(){
     return;
   }
   const progEvents=progressEvents();
-  if(progEvents.length&&view!=='attention'){
-    content.innerHTML='<div class=empty>No data rows yet. Progress is visible in the status strip, Timeline, and Run info.</div>';
+  const metricBeats=attemptEvents().filter(e=>{
+    const a=e.event||e.action||'';
+    return a==='metric'||a==='progress'||a==='checkpoint';
+  });
+  if((progEvents.length||metricBeats.length)&&view!=='attention'){
+    const liveHint=selMeta&&selMeta.live
+      ? ' This run is still active: the table will stay empty until the script emits <code>record</code> rows (not only progress/metric heartbeats). Discovery should stream planned or discovered entity rows as they land — not dump them after the slow phase finishes.'
+      : ' Progress/metric heartbeats advanced without any table rows. If that phase was long, the workflow deferred its <code>record</code> emit until the end.';
+    content.innerHTML='<div class=empty><b>No data rows yet.</b>'+liveHint
+      +'<br><br>Status strip, Timeline, and Run info still show heartbeats. Fix: emit stable <code>record</code> events with a table and key during each slow phase (especially dry-run planned rows).</div>';
     return;
   }
   content.innerHTML='<div class=empty>No data rows yet. This workflow should emit <code>record</code> events with a table and stable key.</div>';

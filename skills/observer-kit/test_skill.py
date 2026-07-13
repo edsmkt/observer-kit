@@ -167,10 +167,12 @@ ok('sample gate requires crash-resume proof beyond a green linter',
 ok('sample work and row-surface liveness are explicit contracts',
    'earliest query/page/batch' in wire_words and
    'Emit stable business rows as source items and classifications become known' in wire_words and
-   'reserve phase rows for work that has no business key yet' in wire_words and
+   'Stream those rows during multi-page discovery and dry-run planning' in wire_words and
    'each slow phase emits a record before its terminal event' in prove_words and
+   'post-discovery planned dump fails the sample' in prove_words and
    'sample limit bounds the earliest query, page, batch, or provider loop' in prove_words and
-   'repeated progress loops have a stable record-row path' in pattern_words and
+   'Live table during slow phases' in pattern_words and
+   'ROW LIVENESS MISSING' in pattern_words and
    'Phase rows cover work before a business key exists and then yield to the business table' in pattern_words and
    'Sample work limit' in explain_words)
 ok('bounded source discovery drives a reviewable table projection',

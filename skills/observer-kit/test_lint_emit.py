@@ -307,6 +307,103 @@ ok("progress with a terminal preview dump is flagged",
 ok("row-surface liveness failure is named",
    'ROW LIVENESS MISSING' in out, out[:240])
 
+# 18b. run.count() heartbeats are not a substitute for live table rows.
+rc, out, err = run_lint("""
+from runguard import start_observed_run, ledger
+def build_targets(run):
+    targets = {}
+    for page in source_pages:
+        for row in fetch_page(page):
+            targets[row['id']] = row
+        run.count('pages_read')
+    return targets
+def main():
+    run = start_observed_run(
+        'scope', dry_run=True,
+        summary_metrics=[{'key': 'pages_read', 'label': 'pages'}])
+    targets = build_targets(run)
+    for row in targets.values():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+    run.success()
+""")
+ok("count heartbeats with a terminal planned dump are flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18c. ledger metric events during discovery also require a row path.
+rc, out, err = run_lint("""
+from runguard import ledger
+def build():
+    targets = {}
+    for page in pages:
+        for row in fetch(page):
+            targets[row['id']] = row
+        ledger('s', 'metric', name='read', value=len(targets))
+    return targets
+def main():
+    for row in build().values():
+        ledger('s', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("metric heartbeats with a terminal planned dump are flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18d. Aliased run.count cannot hide a terminal planned dump.
+rc, out, err = run_lint("""
+from runguard import start_observed_run, ledger
+def build_targets(run):
+    beat = run.count
+    targets = {}
+    for page in source_pages:
+        for row in fetch_page(page):
+            targets[row['id']] = row
+        beat('pages_read')
+    return targets
+def main():
+    run = start_observed_run(
+        'scope', dry_run=True,
+        summary_metrics=[{'key': 'pages_read', 'label': 'pages'}])
+    for row in build_targets(run).values():
+        ledger('scope', 'record', table='companies', key=row['id'],
+               destination='planned')
+    run.success()
+""")
+ok("aliased count heartbeats with a terminal planned dump are flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18e. Imported-style tick() helper name is treated as a heartbeat.
+rc, out, err = run_lint("""
+from elsewhere import tick
+from runguard import ledger
+def build():
+    targets = {}
+    for page in pages:
+        for row in fetch(page):
+            targets[row['id']] = row
+        tick(len(targets))
+    return targets
+def main():
+    for row in build().values():
+        ledger('s', 'record', table='companies', key=row['id'],
+               destination='planned')
+""")
+ok("unresolved tick() heartbeats with a terminal planned dump are flagged",
+   rc == 1 and 'ROW LIVENESS MISSING' in out, f"rc={rc}; {out[:280]}")
+
+# 18f. list.count must not be treated as a run.count heartbeat (false positive).
+rc, out, err = run_lint("""
+from runguard import ledger
+def main():
+    keys = []
+    for page in pages:
+        for row in fetch(page):
+            keys.append(row['id'])
+            n = keys.count(row['id'])
+        ledger('s', 'record', table='companies', key=row['id'], status='ok')
+""")
+ok("list.count does not false-positive as a heartbeat",
+   rc == 0, f"rc={rc}; {out[:280]}")
+
 # 19. Qualified ledger calls pass when progress and stable rows advance together.
 rc, out, err = run_lint("""
 import runguard
