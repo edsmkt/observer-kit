@@ -72,6 +72,7 @@ the dashboard.
 | **Dashboard** | Localhost table, flow graph, cell-anchored chat, pause / stop / approve |
 | **AXI** | `observer-kit axi` — dense TOON status for agents (live runs, orphans, `install_skew`, next commands) |
 | **Compliance gate** | PreToolUse nudge that blocks side-effect scripts not under Observer (not a security boundary — [details](#side-effect-compliance-gate)) |
+| **Secrets via `run`** | Opt-in `--secrets` file of `KEY=op://` pointers; `op run` injects credentials only into the harnessed child |
 | **Observer Flow** | Dependency graph for multi-step pipelines under the same harness |
 
 One script or a multi-node flow both go through the Kit harness. Agents use
@@ -212,6 +213,8 @@ observer-kit dashboard [state_dir] --port 8484
 observer-kit dashboard .observer --parent-pid $$          # exit when this shell dies
 observer-kit dashboard .observer --idle-timeout 1800      # exit after 30m idle
 observer-kit run --state-dir .observer -- python3 workflow.py --dry-run --limit 10
+observer-kit run --state-dir .observer --secrets .observer/secrets.env -- \
+  python3 workflow.py --dry-run --limit 10   # KEY=op:// only; wraps with op run
 observer-kit watch .observer --run runguard:my-run --follow
 observer-kit reply .observer --run runguard:my-run --anchor run --text "I fixed this."
 observer-kit ps .observer                                 # list dashboards/watchers

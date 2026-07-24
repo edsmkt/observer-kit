@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import runpy
 import shutil
 import subprocess
@@ -59,6 +60,87 @@ def copy_file(src: Path, dst: Path, force: bool) -> str:
 def _runtime_module_path(module: str) -> Path:
     """Path to a package runtime module for subprocess entrypoints."""
     return package_file(f"{module}.py")
+
+
+# Secrets via 1Password pointers: harness owns resolution; scripts never hold values.
+# Not a sandbox — only a possession boundary when --secrets is used.
+_OP_POINTER = re.compile(r"^op://\S+$")
+
+
+def load_secret_pointers(path: Path) -> list[str]:
+    """Parse a secrets env file. Every value must be an ``op://`` pointer.
+
+    Returns ordered unique env key names. Exits with code 2 on missing file,
+    empty file, or any non-pointer value (keeps the file committable by
+    construction).
+    """
+    path = path.expanduser()
+    if not path.is_file():
+        raise SystemExit(f"[observer] secrets: file not found: {path}")
+    keys: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"[observer] secrets: cannot read {path}: {exc}") from exc
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise SystemExit(
+                f"[observer] secrets: line {lineno}: expected KEY=op://... "
+                f"(got {raw!r})"
+            )
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key:
+            raise SystemExit(
+                f"[observer] secrets: line {lineno}: missing key name"
+            )
+        if not _OP_POINTER.match(value):
+            raise SystemExit(
+                f"[observer] secrets: line {lineno}: {key} must be an op:// "
+                "pointer only — plain secrets are refused so the file stays "
+                "committable"
+            )
+        keys.append(key)
+    if not keys:
+        raise SystemExit(f"[observer] secrets: no KEY=op:// entries in {path}")
+    seen: set[str] = set()
+    unique: list[str] = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(key)
+    return unique
+
+
+def wrap_command_with_secrets(
+    command: list[str], secrets_path: Path
+) -> tuple[list[str], list[str]]:
+    """Wrap *command* with ``op run --env-file`` so secrets never enter this process.
+
+    Returns ``(wrapped_command, key_names)``. Requires the 1Password CLI on PATH.
+    """
+    secrets_path = secrets_path.expanduser().resolve()
+    keys = load_secret_pointers(secrets_path)
+    op_bin = shutil.which("op")
+    if not op_bin:
+        raise SystemExit(
+            "[observer] secrets: 1Password CLI 'op' not on PATH. "
+            "Install it, or omit --secrets."
+        )
+    wrapped = [
+        op_bin,
+        "run",
+        "--env-file",
+        str(secrets_path),
+        "--",
+        *command,
+    ]
+    return wrapped, keys
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -139,6 +221,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         [sys.executable, "-B", str(tests_dir / "test_axi.py")],
         [sys.executable, "-B", str(tests_dir / "test_agent_acceptance.py")],
         [sys.executable, "-B", str(tests_dir / "test_gate.py")],
+        [sys.executable, "-B", str(tests_dir / "test_secrets.py")],
     ]
     if flow_skill_dir.is_dir():
         tests.extend([
@@ -800,6 +883,20 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"auto-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
             if args.session == "auto" else args.session
         )
+
+    # Credential possession boundary (opt-in): resolve op:// pointers only for
+    # this child. Dry-run samples still get keys; approval remains the spend gate.
+    secrets_arg = getattr(args, "secrets", None)
+    if secrets_arg:
+        secrets_path = Path(secrets_arg).expanduser().resolve()
+        command, secret_keys = wrap_command_with_secrets(command, secrets_path)
+        env["OBSERVER_SECRETS"] = ",".join(secret_keys)
+        print(
+            f"[observer] secrets: injecting {', '.join(secret_keys)} via op run "
+            f"(source={secrets_path})",
+            flush=True,
+        )
+
     proc = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -1504,6 +1601,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-lint",
         action="store_true",
         help="skip static lint gate (default: lint workflow.py before run)",
+    )
+    run.add_argument(
+        "--secrets",
+        metavar="PATH",
+        help=(
+            "env file of KEY=op:// pointers only; wrap the child with "
+            "`op run --env-file` so credentials exist only inside the harnessed "
+            "process (opt-in possession boundary — not a sandbox)"
+        ),
     )
     run.add_argument("command", nargs=argparse.REMAINDER,
                      help="command to run; put -- before the command")
