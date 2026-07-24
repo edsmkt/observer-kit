@@ -90,7 +90,40 @@ with tempfile.TemporaryDirectory(prefix="observer-secrets-") as tmp:
     code, msg = expect_exit(load_secret_pointers, plain)
     ok(
         "load_secret_pointers refuses plain secret values with exit 2",
-        code == 2 and "op://" in msg and "committable" in msg,
+        code == 2 and "op://" in msg and "sk-live" not in msg,
+        f"code={code} msg={msg}",
+    )
+
+    templated = root / "templated.env"
+    templated.write_text(
+        "API_KEY=op://${ATTACKER_VAULT}/item/field\n", encoding="utf-8"
+    )
+    code, msg = expect_exit(load_secret_pointers, templated)
+    ok(
+        "load_secret_pointers refuses op:// with $ interpolation",
+        code == 2
+        and ("template" in msg.lower() or "strict" in msg.lower())
+        and "ATTACKER_VAULT" not in msg,
+        f"code={code} msg={msg}",
+    )
+
+    bad_key = root / "badkey.env"
+    bad_key.write_text("WEIRD,KEY=op://vault/item/field\n", encoding="utf-8")
+    code, msg = expect_exit(load_secret_pointers, bad_key)
+    ok(
+        "load_secret_pointers rejects comma in key names",
+        code == 2 and "invalid key" in msg,
+        f"code={code} msg={msg}",
+    )
+
+    leaked = root / "leaked.env"
+    leaked.write_text("my secret token is sk-live-xxxxx\n", encoding="utf-8")
+    code, msg = expect_exit(load_secret_pointers, leaked)
+    ok(
+        "malformed line never echoes raw content to stderr",
+        code == 2
+        and "sk-live-xxxxx" not in msg
+        and "malformed line omitted" in msg,
         f"code={code} msg={msg}",
     )
 
@@ -161,7 +194,7 @@ with tempfile.TemporaryDirectory(prefix="observer-secrets-") as tmp:
         code, msg = expect_exit(wrap_command_with_secrets, ["python3", "w.py"], good)
         ok(
             "wrap_command_with_secrets fails closed when op missing with exit 2",
-            code == 2 and "op" in msg and "PATH" in msg,
+            code == 2 and "op" in msg,
             f"code={code} msg={msg}",
         )
     finally:
@@ -199,16 +232,25 @@ with tempfile.TemporaryDirectory(prefix="observer-secrets-") as tmp:
     fake_op.chmod(fake_op.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     os.environ["PATH"] = str(fake_bin) + os.pathsep + (saved_path or os.defpath)
+    os.environ["OBSERVER_OP_BIN"] = str(fake_op.resolve())
     try:
-        wrapped, wrap_keys = wrap_command_with_secrets(["echo", "hi"], good)
+        wrapped, wrap_keys, snap = wrap_command_with_secrets(["echo", "hi"], good)
         ok(
-            "wrap_command_with_secrets prefixes op run --env-file --",
+            "wrap_command_with_secrets prefixes op run --env-file snapshot --",
             wrap_keys == ["HUBSPOT_TOKEN", "CLAY_API_KEY"]
-            and wrapped[0].endswith("/op")
-            and wrapped[1:5] == ["run", "--env-file", str(good.resolve()), "--"]
-            and wrapped[5:] == ["echo", "hi"],
+            and Path(wrapped[0]).resolve() == fake_op.resolve()
+            and wrapped[1:3] == ["run", "--env-file"]
+            and wrapped[3] == str(snap)
+            and wrapped[4] == "--"
+            and wrapped[5:] == ["echo", "hi"]
+            and snap.is_file()
+            and "op://vault/hubspot/credential" in snap.read_text(encoding="utf-8"),
             str(wrapped),
         )
+        try:
+            snap.unlink(missing_ok=True)
+        except OSError:
+            pass
 
         # End-to-end: observer-kit run --secrets with fake op
         project = root / "project"
@@ -230,8 +272,9 @@ with tempfile.TemporaryDirectory(prefix="observer-secrets-") as tmp:
         )
         run_env = ENV.copy()
         run_env["PATH"] = str(fake_bin) + os.pathsep + run_env.get("PATH", "")
-        # Strip any real tokens from the parent so we only see op injection.
-        run_env.pop("HUBSPOT_TOKEN", None)
+        run_env["OBSERVER_OP_BIN"] = str(fake_op.resolve())
+        # Parent holds a literal for a declared key — must be scrubbed (F1).
+        run_env["HUBSPOT_TOKEN"] = "sk-live-LITERAL-BYPASS"
         run_env.pop("CLAY_API_KEY", None)
 
         proc = subprocess.run(
@@ -264,11 +307,17 @@ with tempfile.TemporaryDirectory(prefix="observer-secrets-") as tmp:
         ok(
             "run --secrets wraps child and injects names-only OBSERVER_SECRETS",
             proc.returncode == 0
-            and "secrets: injecting HUBSPOT_TOKEN, CLAY_API_KEY" in out
+            and "secrets: requesting HUBSPOT_TOKEN, CLAY_API_KEY" in out
             and "TOKEN=test-token-from-op" in out
             and "CLAY=test-clay-from-op" in out
-            and "MARKER=HUBSPOT_TOKEN,CLAY_API_KEY" in out,
+            and "MARKER=HUBSPOT_TOKEN,CLAY_API_KEY" in out
+            and "sk-live-LITERAL-BYPASS" not in out,
             out[-800:],
+        )
+        ok(
+            "run --secrets scrubs parent literals for declared keys before op",
+            proc.returncode == 0 and "TOKEN=test-token-from-op" in out,
+            out[-400:],
         )
 
         # Without --secrets, child does not get fake tokens (and no wrap)
@@ -360,6 +409,7 @@ with tempfile.TemporaryDirectory(prefix="observer-secrets-") as tmp:
         strict_env = run_env.copy()
         strict_env.pop("OBSERVER_ALLOW_UNAPPROVED_FULL_RUN", None)
         strict_env["OBSERVER_REQUIRE_FULL_RUN_APPROVAL"] = "1"
+        strict_env["OBSERVER_OP_BIN"] = str(fake_op.resolve())
         proc4 = subprocess.run(
             [
                 sys.executable,
@@ -456,6 +506,7 @@ with tempfile.TemporaryDirectory(prefix="observer-secrets-") as tmp:
             approved_msg,
         )
     finally:
+        os.environ.pop("OBSERVER_OP_BIN", None)
         if saved_path is None:
             os.environ.pop("PATH", None)
         else:

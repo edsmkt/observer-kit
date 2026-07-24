@@ -64,7 +64,9 @@ def _runtime_module_path(module: str) -> Path:
 
 # Secrets via 1Password pointers: harness owns resolution; scripts never hold values.
 # Not a sandbox — only a possession boundary when --secrets is used.
-_OP_POINTER = re.compile(r"^op://\S+$")
+# Strict grammar: no $/{}/` interpolation, no spaces in refs (op templates unsupported).
+_OP_POINTER = re.compile(r"^op://[A-Za-z0-9][A-Za-z0-9_.\-/]*$")
+_SECRET_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Match ApprovalRequired.exit_code in runguard — full-run without approval.
 _SECRETS_APPROVAL_EXIT = 4
 _SECRETS_USAGE_EXIT = 2
@@ -76,17 +78,17 @@ def _secrets_exit(message: str, code: int = _SECRETS_USAGE_EXIT) -> None:
     raise SystemExit(code)
 
 
-def load_secret_pointers(path: Path) -> list[str]:
-    """Parse a secrets env file. Every value must be an ``op://`` pointer.
+def load_secret_entries(path: Path) -> list[tuple[str, str]]:
+    """Parse a secrets env file into ordered ``(KEY, op://…)`` pairs.
 
-    Returns ordered unique env key names. Exits with code 2 on missing file,
-    empty file, or any non-pointer value (keeps the file committable by
-    construction).
+    Every value must be a strict ``op://`` pointer (no ``$``/``{}`` templates,
+    no plain secrets). Keys must be POSIX-ish env names without commas.
+    Exits with code 2 on validation failure.
     """
     path = path.expanduser()
     if not path.is_file():
         _secrets_exit(f"[observer] secrets: file not found: {path}")
-    keys: list[str] = []
+    entries: list[tuple[str, str]] = []
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -96,32 +98,96 @@ def load_secret_pointers(path: Path) -> list[str]:
         if not line or line.startswith("#"):
             continue
         if "=" not in line:
+            # Never echo the raw line — it may contain a pasted secret.
             _secrets_exit(
                 f"[observer] secrets: line {lineno}: expected KEY=op://... "
-                f"(got {raw!r})"
+                "(malformed line omitted from log)"
             )
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            if len(value) >= 2:
+                value = value[1:-1]
         if not key:
             _secrets_exit(f"[observer] secrets: line {lineno}: missing key name")
+        if not _SECRET_KEY.match(key):
+            _secrets_exit(
+                f"[observer] secrets: line {lineno}: invalid key name {key!r} "
+                "(use A-Z, 0-9, underscore; no commas)"
+            )
         if not _OP_POINTER.match(value):
             _secrets_exit(
-                f"[observer] secrets: line {lineno}: {key} must be an op:// "
-                "pointer only — plain secrets are refused so the file stays "
-                "committable"
+                f"[observer] secrets: line {lineno}: {key} must be a strict "
+                "op://pointer (no $/{}/templates, no plain secrets) so the file "
+                "stays committable and uninterpolated"
             )
-        keys.append(key)
-    if not keys:
+        entries.append((key, value))
+    if not entries:
         _secrets_exit(f"[observer] secrets: no KEY=op:// entries in {path}")
     seen: set[str] = set()
-    unique: list[str] = []
-    for key in keys:
+    unique: list[tuple[str, str]] = []
+    for key, value in entries:
         if key in seen:
             continue
         seen.add(key)
-        unique.append(key)
+        unique.append((key, value))
     return unique
+
+
+def load_secret_pointers(path: Path) -> list[str]:
+    """Return ordered unique env key names from a secrets env file."""
+    return [key for key, _ in load_secret_entries(path)]
+
+
+def resolve_op_bin() -> str:
+    """Locate the 1Password CLI.
+
+    Prefer absolute ``OBSERVER_OP_BIN`` (operator-controlled). Otherwise
+    ``PATH`` lookup via ``shutil.which`` — agents can poison PATH, so set
+    OBSERVER_OP_BIN in production.
+    """
+    override = os.environ.get("OBSERVER_OP_BIN", "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        if not candidate.is_absolute():
+            _secrets_exit(
+                f"[observer] secrets: OBSERVER_OP_BIN must be an absolute path "
+                f"(got {override!r})"
+            )
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            _secrets_exit(
+                f"[observer] secrets: OBSERVER_OP_BIN not executable: {candidate}"
+            )
+        return str(candidate.resolve())
+    found = shutil.which("op")
+    if not found:
+        _secrets_exit(
+            "[observer] secrets: 1Password CLI 'op' not on PATH. "
+            "Install it, set OBSERVER_OP_BIN to an absolute path, or omit --secrets."
+        )
+    return found
+
+
+def snapshot_secrets_env(entries: list[tuple[str, str]]) -> Path:
+    """Write validated pointers to a mode-0600 tempfile (TOCTOU-safe for op)."""
+    import tempfile
+
+    fd, name = tempfile.mkstemp(prefix="observer-secrets-", suffix=".env")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            for key, value in entries:
+                fh.write(f"{key}={value}\n")
+    except Exception:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+        raise
+    return Path(name)
 
 
 def command_implies_dry_run(command: list[str]) -> bool:
@@ -291,28 +357,27 @@ def record_secrets_injection(
 
 def wrap_command_with_secrets(
     command: list[str], secrets_path: Path
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], Path]:
     """Wrap *command* with ``op run --env-file`` so secrets never enter this process.
 
-    Returns ``(wrapped_command, key_names)``. Requires the 1Password CLI on PATH.
+    Returns ``(wrapped_command, key_names, snapshot_path)``. Caller must delete
+    *snapshot_path* after the child exits. Requires the 1Password CLI
+    (``OBSERVER_OP_BIN`` or PATH).
     """
     secrets_path = secrets_path.expanduser().resolve()
-    keys = load_secret_pointers(secrets_path)
-    op_bin = shutil.which("op")
-    if not op_bin:
-        _secrets_exit(
-            "[observer] secrets: 1Password CLI 'op' not on PATH. "
-            "Install it, or omit --secrets."
-        )
+    entries = load_secret_entries(secrets_path)
+    keys = [key for key, _ in entries]
+    snapshot = snapshot_secrets_env(entries)
+    op_bin = resolve_op_bin()
     wrapped = [
         op_bin,
         "run",
         "--env-file",
-        str(secrets_path),
+        str(snapshot),
         "--",
         *command,
     ]
-    return wrapped, keys
+    return wrapped, keys, snapshot
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -1050,6 +1115,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     env = os.environ.copy()
     env["RUNGUARD_STATE_DIR"] = str(state_dir)
     env["PYTHONUNBUFFERED"] = "1"
+    # Observability hint only — never an attestation that op gated this run.
+    env.pop("OBSERVER_SECRETS", None)
     if args.session:
         env["RUNGUARD_SESSION"] = (
             f"auto-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{os.getpid()}"
@@ -1061,6 +1128,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # approve_full_run before op is invoked (no credentials on exit 4).
     secrets_arg = getattr(args, "secrets", None)
     secrets_meta: dict | None = None
+    secrets_snapshot: Path | None = None
     if secrets_arg:
         secrets_path = Path(secrets_arg).expanduser().resolve()
         child_argv = list(command)
@@ -1070,7 +1138,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             child_argv,
             run_id=getattr(args, "run_id", None) or None,
         )
-        command, secret_keys = wrap_command_with_secrets(child_argv, secrets_path)
+        command, secret_keys, secrets_snapshot = wrap_command_with_secrets(
+            child_argv, secrets_path
+        )
+        # Fail closed: only op may supply declared keys (not a parent export).
+        for key in secret_keys:
+            env.pop(key, None)
+        # Hint for the child only — not proof of resolution (see OBSERVER_OP_BIN).
         env["OBSERVER_SECRETS"] = ",".join(secret_keys)
         record_secrets_injection(
             state_dir,
@@ -1086,7 +1160,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "lane_recorded": False,
         }
         print(
-            f"[observer] secrets: injecting {', '.join(secret_keys)} via op run "
+            f"[observer] secrets: requesting {', '.join(secret_keys)} via op run "
             f"(source={secrets_path})",
             flush=True,
         )
@@ -1136,6 +1210,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         rc = 130
     out_thread.join()
     err_thread.join()
+
+    if secrets_snapshot is not None:
+        try:
+            secrets_snapshot.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if secrets_meta is not None and rc == 0:
+        print(
+            f"[observer] secrets: child exited 0 after op run "
+            f"({', '.join(secrets_meta['keys'])})",
+            flush=True,
+        )
 
     if run_id_holder["run_id"] is None and args.watch != "none":
         print("[observer] no OBSERVER_RUN_STARTED marker was seen; watcher was not started", file=sys.stderr)
