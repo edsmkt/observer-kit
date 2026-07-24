@@ -1,15 +1,26 @@
-# Three-auditor panel
+# Three-auditor panel + fix loop
 
-When auditing or validating a list of checks, use this concurrency rule:
+When auditing a list of checks:
 
-1. **One shared prompt per check** (same scope, intent, deliberate decisions, non-goals).
-2. **Three seats, concurrent:** [buggie](../.claude/skills/buggie/SKILL.md) · [no-mistakes](../.claude/skills/no-mistakes/SKILL.md) · [ponytail ultra](../.claude/skills/ponytail/SKILL.md) (or ponytail-review).
-3. **Wait for all three**, synthesize, then start the **next** check.
-4. **Never** launch (N checks × 3) in one blast — only **3 at a time**.
+1. **One shared prompt per check** (scope, intent, deliberate decisions, non-goals).
+2. **Three seats, concurrent:** [buggie](../.claude/skills/buggie/SKILL.md) · [no-mistakes](../.claude/skills/no-mistakes/SKILL.md) · [ponytail ultra](../.claude/skills/ponytail/SKILL.md).
+3. **Synthesize → fix** agreed majors (verify before/after).
+4. **Auditor loop:** update `auditor-loop/PROMPT.md` (or residual brief), run `./auditor-loop/run.sh`, read `LATEST.md`, fix again if needed.
+5. **Repeat triad + auditor-loop** on the **same** check until no major issues.
+6. **Only then** start the next check. Never fan out (N × 3) in one blast.
 
-Full protocol, prompt template, and hollow-pass warnings:
+```text
+for each check:
+  while majors remain:
+    buggie + no-mistakes + ponytail ultra  (wait)
+    fix
+    ./auditor-loop/run.sh → LATEST.md → fix
+  next check
+```
 
-- Local harness (often git-excluded on this machine): `auditor-loop/AUDIT_PANEL.md`
+Full protocol, prompt template, major vs residual:
+
+- Local harness (often git-excluded): `auditor-loop/AUDIT_PANEL.md`
 - Operator notes: `auditor-loop/HOW_GROK_USES_THIS.md`
 
-**no-mistakes** needs a feature branch with real commits ahead of `main`. Same tip as main → skipped steps, not “auditors accepted.”
+**no-mistakes** needs a feature branch with real commits ahead of `main`. Same tip as main → skipped steps, not acceptance.
